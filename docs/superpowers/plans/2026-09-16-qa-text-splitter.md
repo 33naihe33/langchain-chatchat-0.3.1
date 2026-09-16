@@ -12,12 +12,13 @@
 
 - Do not modify the source DOCX or change the default `TEXT_SPLITTER_NAME`.
 - Support `Q/q/问` and `A/a/答` at line start, with `:` or `：` and optional whitespace.
-- Split preamble and non-QA text through `ChineseRecursiveTextSplitter`; continuation lines remain in the current QA until the next question marker.
+- Split preamble and non-QA text through a new `ChineseRecursiveTextSplitter` whose separators append `""`; continuation lines remain in the current QA until the next question marker.
 - Trim records before `len()` checks. For overlong QA, retain the question in every child and its recognized answer marker only in the first child.
-- Use one inner `ChineseRecursiveTextSplitter(chunk_size=chunk_size-len(first_prefix), chunk_overlap=chunk_overlap)`; never mutate `self` sizing fields.
+- Use one inner `ChineseRecursiveTextSplitter(chunk_size=chunk_size-len(first_prefix), chunk_overlap=chunk_overlap, separators=[*self._separators, ""])`; use the same strict separator list for fallback text and never mutate `self` sizing fields.
 - Only on the overlong path, raise `ValueError` when `len(first_prefix) + chunk_overlap >= chunk_size` and state that the operator must increase `chunk_size` or lower `chunk_overlap`.
 - Group only consecutive documents having the same `metadata["source"]`; use one newline as joiner and copy the first document metadata to all resulting chunks.
 - Output preamble chunks first, then QA chunks in source order. After opt-in, restart the service and rebuild the vector store.
+- Run every test and inspection with `/Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest` or `/Users/caomengdi/miniforge3/envs/chatchat-v031/bin/python`; never use the system interpreter.
 
 ---
 
@@ -57,7 +58,7 @@ def test_preamble_precedes_qa_and_answer_continuation_is_retained():
 
 - [ ] **Step 2: Run the new tests and verify RED**
 
-Run: `cd libs/chatchat-server && pytest tests/custom_splitter/test_qa_text_splitter.py -v`
+Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest tests/custom_splitter/test_qa_text_splitter.py -v`
 
 Expected: collection fails because `QATextSplitter` does not yet exist.
 
@@ -103,11 +104,16 @@ def test_complete_short_record_with_same_prefix_does_not_raise():
 def test_non_qa_text_uses_recursive_fallback():
     splitter = QATextSplitter(chunk_size=10, chunk_overlap=0)
     assert splitter.split_text("甲乙丙丁戊己庚辛壬癸子丑") == ["甲乙丙丁戊己庚辛壬癸", "子丑"]
+
+
+def test_empty_answer_body_does_not_index_an_empty_chunk_list():
+    splitter = QATextSplitter(chunk_size=20, chunk_overlap=0)
+    assert splitter.split_text("Q: x\nA:") == ["Q: x\nA:"]
 ```
 
 - [ ] **Step 4: Run the module again and verify the new behavior is RED**
 
-Run: `cd libs/chatchat-server && pytest tests/custom_splitter/test_qa_text_splitter.py -v`
+Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest tests/custom_splitter/test_qa_text_splitter.py -v`
 
 Expected: FAIL until production implementation exists.
 
@@ -150,11 +156,14 @@ def _split_record(self, record: str) -> List[str]:
     answer_chunks = ChineseRecursiveTextSplitter(
         chunk_size=self._chunk_size - len(first_prefix),
         chunk_overlap=self._chunk_overlap,
+        separators=[*self._separators, ""],
     ).split_text(answer_body)
+    if not answer_chunks:
+        return [record]
     return [f"{first_prefix}{answer_chunks[0]}"] + [f"{question}\n{chunk}" for chunk in answer_chunks[1:]]
 ```
 
-Use `super().split_text(text.strip())` for no-QA and preamble text, and only invoke `_split_record` for question-started records.
+Use a new `ChineseRecursiveTextSplitter` with `separators=[*self._separators, ""]` for no-QA and preamble text, and only invoke `_split_record` for question-started records.
 
 - [ ] **Step 3: Implement source grouping and module export**
 
@@ -169,7 +178,7 @@ def _split_source_group(self, docs: List[Document]) -> List[Document]:
 
 - [ ] **Step 4: Run the focused tests and verify GREEN**
 
-Run: `cd libs/chatchat-server && pytest tests/custom_splitter/test_qa_text_splitter.py -v`
+Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest tests/custom_splitter/test_qa_text_splitter.py -v`
 
 Expected: all tests pass.
 
@@ -202,9 +211,9 @@ def test_factory_creates_qa_text_splitter():
 
 - [ ] **Step 2: Verify RED, then register the settings entry**
 
-Run: `cd libs/chatchat-server && pytest tests/custom_splitter/test_qa_text_splitter.py::test_factory_creates_qa_text_splitter -v`
+Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest tests/custom_splitter/test_qa_text_splitter.py::test_factory_creates_qa_text_splitter -v`
 
-Expected before edit: FAIL with missing `QATextSplitter` configuration key.
+Expected before edit: FAIL because `make_text_splitter` catches the missing configuration key and silently returns `RecursiveCharacterTextSplitter`, so the class-name assertion fails.
 
 Add beside the other local entries in `text_splitter_dict`:
 
@@ -214,13 +223,15 @@ Add beside the other local entries in `text_splitter_dict`:
 
 - [ ] **Step 3: Run complete regression and source inspection**
 
-Run: `cd libs/chatchat-server && pytest tests/custom_splitter/test_qa_text_splitter.py tests/custom_splitter/test_different_splitter.py -v`
+Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest tests/custom_splitter/test_qa_text_splitter.py tests/custom_splitter/test_different_splitter.py -v`
 
 Expected: PASS.
 
-Run: `cd libs/chatchat-server && python -c 'from chatchat.server.knowledge_base.utils import KnowledgeFile; from chatchat.settings import Settings; Settings.kb_settings.TEXT_SPLITTER_NAME="QATextSplitter"; f=KnowledgeFile("test.docx", "司库test"); chunks=f.file2text(refresh=True, chunk_size=750, chunk_overlap=150); print(len(chunks))'`
+Run every Python and pytest command in this plan with `/Users/caomengdi/miniforge3/envs/chatchat-v031/bin/python` and `/Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest`, respectively. For the source inspection run:
 
-Expected: prints `7` for the user's DOCX; it does not edit the DOCX or write vectors.
+Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/python -c 'from chatchat.server.knowledge_base.utils import KnowledgeFile; from chatchat.settings import Settings; Settings.kb_settings.TEXT_SPLITTER_NAME="QATextSplitter"; f=KnowledgeFile("test.docx", "司库test"); chunks=f.file2text(refresh=True, chunk_size=750, chunk_overlap=150); print(len(chunks))'`
+
+Expected: prints the observed chunk count without editing the DOCX or writing vectors. Verify that each source QA remains intact; report whether the observed count is seven rather than assuming it beforehand.
 
 - [ ] **Step 4: Commit settings and final tests**
 
