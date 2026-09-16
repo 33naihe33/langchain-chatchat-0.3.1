@@ -22,7 +22,7 @@ The question marker starts a new QA record. Its record ends immediately before t
 ## Splitting Behavior
 
 1. Each record is trimmed with `strip()` before any emptiness or length check. A QA record whose complete trimmed text has `len(text) <= chunk_size` becomes exactly one chunk containing its question and answer.
-2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided once by a new `ChineseRecursiveTextSplitter` instance with the configured overlap and a uniform budget of `chunk_size - len(first_prefix)`, where `first_prefix` is `question + "\n" + answer_marker + "\n"`. This conservative budget ensures both the first child and the later, shorter-prefixed children remain within `chunk_size`. The `A:` or `A：` marker is retained only in the first child chunk.
+2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided once by a new `ChineseRecursiveTextSplitter` instance with the configured overlap and a uniform budget of `chunk_size - len(first_prefix)`, where `first_prefix` is `question + "\n" + answer_marker + "\n"`. This conservative budget ensures both the first child and the later, shorter-prefixed children remain within `chunk_size`. The recognized answer marker is retained only in the first child chunk.
 3. Only for a record that actually requires answer-body splitting under rule 2, the splitter raises `ValueError` with an instruction to increase `chunk_size` or lower `chunk_overlap` if `len(first_prefix) + chunk_overlap >= chunk_size`. Records emitted intact under rule 1 are exempt. This avoids silently emitting an over-limit chunk, dropping the question, or constructing an inner splitter whose overlap is not smaller than its chunk budget.
 4. The leading text before the first recognized question marker is a preamble. It is independently delegated to `ChineseRecursiveTextSplitter` and is never attached to the first QA record.
 5. A mixed document is processed by segment: each QA record uses QA behavior, while the preamble uses `ChineseRecursiveTextSplitter`. A document without any recognized question marker wholly uses `ChineseRecursiveTextSplitter`.
@@ -57,7 +57,7 @@ Add focused tests that verify:
 - Consecutive loader-produced documents from the same source are combined so a question and answer that were loaded separately become one QA chunk; different sources remain isolated.
 - Preamble chunks precede QA chunks; a long answer retains its question in every child and its answer marker only in the first child.
 - Overlong-answer budgets deduct their complete output prefixes, and trailing whitespace does not affect length decisions.
-- A question prefix plus overlap that exhausts the chunk budget raises `ValueError` with a clear recovery message.
+- An overlong QA record whose question prefix plus overlap exhausts the chunk budget raises `ValueError` with a clear recovery message; a complete, short QA with the same prefix does not.
 - Source metadata is copied to emitted chunks.
 - Concatenated documents with conflicting metadata use the first document's metadata.
 
