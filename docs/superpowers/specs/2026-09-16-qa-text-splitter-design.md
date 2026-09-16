@@ -8,7 +8,7 @@ Preserve each question and its answer from structured QA documents as one vector
 
 Add a configurable `QATextSplitter` to the knowledge-base text splitters. The source DOCX remains unchanged. The feature takes effect when the knowledge base is rebuilt with `TEXT_SPLITTER_NAME` set to `QATextSplitter`.
 
-`RapidOCRDocLoader` can produce several LangChain `Document` objects for one source DOCX. To preserve QA pairs that span those loader objects, `QATextSplitter.split_documents` concatenates the consecutive documents it receives for one source file before applying QA parsing. It never combines documents from different sources.
+`RapidOCRDocLoader` can produce several LangChain `Document` objects for one source DOCX. To preserve QA pairs that span those loader objects, `QATextSplitter.split_documents` concatenates the consecutive documents it receives for one source file with `"\n"` separators before applying QA parsing. It never combines documents from different sources.
 
 ## Input Format
 
@@ -21,13 +21,14 @@ The question marker starts a new QA record. Its record ends immediately before t
 
 ## Splitting Behavior
 
-1. A QA record whose complete text has `len(text) <= chunk_size` becomes exactly one chunk containing its question and answer.
-2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided by `ChineseRecursiveTextSplitter` with the configured length and overlap values. The `A:` or `A：` marker is retained only in the first child chunk.
-3. The leading text before the first recognized question marker is a preamble. It is independently delegated to `ChineseRecursiveTextSplitter` and is never attached to the first QA record.
-4. A mixed document is processed by segment: each QA record uses QA behavior, while the preamble uses `ChineseRecursiveTextSplitter`. A document without any recognized question marker wholly uses `ChineseRecursiveTextSplitter`.
-5. Empty or whitespace-only records are not emitted.
-6. Output order is the preamble chunks first, followed by QA chunks in source-document order.
-7. Output chunks retain the metadata of their source document.
+1. Each record is trimmed with `strip()` before any emptiness or length check. A QA record whose complete trimmed text has `len(text) <= chunk_size` becomes exactly one chunk containing its question and answer.
+2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided by `ChineseRecursiveTextSplitter` with the configured length and overlap values. Its budget is `chunk_size - len(prefix)`, where the first child prefix is `question + "\n" + answer_marker + "\n"` and a later child prefix is `question + "\n"`. The `A:` or `A：` marker is retained only in the first child chunk.
+3. If either prefix is at least `chunk_size` characters, the splitter raises `ValueError` with an instruction to increase `chunk_size`; it never silently emits an over-limit chunk or drops the question.
+4. The leading text before the first recognized question marker is a preamble. It is independently delegated to `ChineseRecursiveTextSplitter` and is never attached to the first QA record.
+5. A mixed document is processed by segment: each QA record uses QA behavior, while the preamble uses `ChineseRecursiveTextSplitter`. A document without any recognized question marker wholly uses `ChineseRecursiveTextSplitter`.
+6. Empty or whitespace-only records are not emitted.
+7. Output order is the preamble chunks first, followed by QA chunks in source-document order.
+8. Output chunks retain the metadata of their source document.
 
 ## Implementation Constraints
 
@@ -54,6 +55,7 @@ Add focused tests that verify:
 - Preamble text in a mixed document is split separately and answer continuation lines remain in their preceding QA record.
 - Consecutive loader-produced documents from the same source are combined so a question and answer that were loaded separately become one QA chunk; different sources remain isolated.
 - Preamble chunks precede QA chunks; a long answer retains its question in every child and its answer marker only in the first child.
+- Overlong-answer budgets deduct their complete output prefixes, and trailing whitespace does not affect length decisions.
 - Source metadata is copied to emitted chunks.
 
 ## Operational Notes
