@@ -22,8 +22,8 @@ The question marker starts a new QA record. Its record ends immediately before t
 ## Splitting Behavior
 
 1. Each record is trimmed with `strip()` before any emptiness or length check. A QA record whose complete trimmed text has `len(text) <= chunk_size` becomes exactly one chunk containing its question and answer.
-2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided once by `ChineseRecursiveTextSplitter` with the configured overlap and a uniform budget of `chunk_size - len(first_prefix)`, where `first_prefix` is `question + "\n" + answer_marker + "\n"`. This conservative budget ensures both the first child and the later, shorter-prefixed children remain within `chunk_size`. The `A:` or `A：` marker is retained only in the first child chunk.
-3. If either prefix is at least `chunk_size` characters, the splitter raises `ValueError` with an instruction to increase `chunk_size`; it never silently emits an over-limit chunk or drops the question.
+2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided once by a new `ChineseRecursiveTextSplitter` instance with the configured overlap and a uniform budget of `chunk_size - len(first_prefix)`, where `first_prefix` is `question + "\n" + answer_marker + "\n"`. This conservative budget ensures both the first child and the later, shorter-prefixed children remain within `chunk_size`. The `A:` or `A：` marker is retained only in the first child chunk.
+3. The splitter raises `ValueError` with an instruction to increase `chunk_size` or lower `chunk_overlap` if `len(first_prefix) + chunk_overlap >= chunk_size`. This avoids silently emitting an over-limit chunk, dropping the question, or constructing an inner splitter whose overlap is not smaller than its chunk budget.
 4. The leading text before the first recognized question marker is a preamble. It is independently delegated to `ChineseRecursiveTextSplitter` and is never attached to the first QA record.
 5. A mixed document is processed by segment: each QA record uses QA behavior, while the preamble uses `ChineseRecursiveTextSplitter`. A document without any recognized question marker wholly uses `ChineseRecursiveTextSplitter`.
 6. Empty or whitespace-only records are not emitted.
@@ -32,7 +32,7 @@ The question marker starts a new QA record. Its record ends immediately before t
 
 ## Implementation Constraints
 
-`QATextSplitter` subclasses `ChineseRecursiveTextSplitter`, and therefore indirectly subclasses LangChain `TextSplitter`. It accepts arbitrary keyword arguments, including the `pipeline="zh_core_web_sm"` passed by `make_text_splitter`. It overrides `split_text` for QA-aware text splitting and `split_documents` solely to concatenate loader-produced documents with the same `source` before calling `split_text` and restoring their metadata.
+`QATextSplitter` subclasses `ChineseRecursiveTextSplitter`, and therefore indirectly subclasses LangChain `TextSplitter`. It accepts arbitrary keyword arguments, including the `pipeline="zh_core_web_sm"` passed by `make_text_splitter`. It overrides `split_text` for QA-aware text splitting and `split_documents` solely to concatenate loader-produced documents with the same `source` before calling `split_text` and restoring their metadata. It creates a new inner splitter for answer bodies and never mutates `self._chunk_size` or `self._chunk_overlap`.
 
 ## Configuration
 
@@ -56,7 +56,7 @@ Add focused tests that verify:
 - Consecutive loader-produced documents from the same source are combined so a question and answer that were loaded separately become one QA chunk; different sources remain isolated.
 - Preamble chunks precede QA chunks; a long answer retains its question in every child and its answer marker only in the first child.
 - Overlong-answer budgets deduct their complete output prefixes, and trailing whitespace does not affect length decisions.
-- A question prefix that exhausts the chunk budget raises `ValueError` with a clear recovery message.
+- A question prefix plus overlap that exhausts the chunk budget raises `ValueError` with a clear recovery message.
 - Source metadata is copied to emitted chunks.
 
 ## Operational Notes
