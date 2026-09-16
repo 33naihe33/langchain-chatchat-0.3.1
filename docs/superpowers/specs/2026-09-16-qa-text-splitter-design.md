@@ -14,8 +14,8 @@ Add a configurable `QATextSplitter` to the knowledge-base text splitters. The so
 
 The splitter recognizes question and answer markers at the start of a line, with optional surrounding whitespace:
 
-- Questions: `Q:`, `Q：`, `Q :`, and `Q ：`
-- Answers: `A:`, `A：`, `A :`, and `A ：`
+- Questions: `Q:`, `Q：`, `Q :`, `Q ：`, lowercase `q` variants, and `问` variants with either colon and optional spaces
+- Answers: `A:`, `A：`, `A :`, `A ：`, lowercase `a` variants, and `答` variants with either colon and optional spaces
 
 The question marker starts a new QA record. Its record ends immediately before the next question marker. Answer markers are retained as part of the record content. Every non-marker line after a question marker, including answer continuation lines and blank lines, belongs to the current QA record until the next question marker.
 
@@ -28,7 +28,7 @@ The question marker starts a new QA record. Its record ends immediately before t
 5. A mixed document is processed by segment: each QA record uses QA behavior, while the preamble uses `ChineseRecursiveTextSplitter`. A document without any recognized question marker wholly uses `ChineseRecursiveTextSplitter`.
 6. Empty or whitespace-only records are not emitted.
 7. Output order is the preamble chunks first, followed by QA chunks in source-document order.
-8. Output chunks retain the metadata of their source document.
+8. Output chunks retain the metadata of their source document. When multiple loader-produced documents from one source are concatenated, output chunks copy the first document's metadata; later conflicting values (such as page number) are not merged.
 
 ## Implementation Constraints
 
@@ -49,6 +49,7 @@ The default splitter remains unchanged to avoid altering existing knowledge base
 Add focused tests that verify:
 
 - Chinese and English question/answer colons, including optional spaces, form separate QA chunks.
+- Lowercase `q:/a:` and Chinese `问：/答：` markers form QA chunks.
 - A short QA is emitted intact as one chunk.
 - A long answer is split into multiple chunks and each includes the original question.
 - A source document without QA markers falls back to standard character splitting.
@@ -58,6 +59,7 @@ Add focused tests that verify:
 - Overlong-answer budgets deduct their complete output prefixes, and trailing whitespace does not affect length decisions.
 - A question prefix plus overlap that exhausts the chunk budget raises `ValueError` with a clear recovery message.
 - Source metadata is copied to emitted chunks.
+- Concatenated documents with conflicting metadata use the first document's metadata.
 
 ## Operational Notes
 
