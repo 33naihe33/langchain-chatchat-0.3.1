@@ -17,7 +17,7 @@ The splitter recognizes question and answer markers at the start of a line, with
 - Questions: `Q:`, `Q：`, `Q :`, `Q ：`, lowercase `q` variants, and `问` variants with either colon and optional spaces
 - Answers: `A:`, `A：`, `A :`, `A ：`, lowercase `a` variants, and `答` variants with either colon and optional spaces
 
-The question marker starts a new QA record. Its record ends immediately before the next question marker. Answer markers are retained as part of the record content. Every non-marker line after a question marker, including answer continuation lines and blank lines, belongs to the current QA record until the next question marker.
+The question marker starts a new QA record. Its record ends immediately before the next question marker. Answer markers are retained as part of the record content. Every non-marker line after a question marker, including answer continuation lines and blank lines, belongs to the current QA record until the next question marker. For a record with an answer marker, the question prefix is all content before that answer marker, including any loader-inserted line breaks.
 
 ## Splitting Behavior
 

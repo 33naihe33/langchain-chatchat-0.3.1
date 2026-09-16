@@ -12,7 +12,7 @@
 
 - Do not modify the source DOCX or change the default `TEXT_SPLITTER_NAME`.
 - Support `Q/q/问` and `A/a/答` at line start, with `:` or `：` and optional whitespace.
-- Split preamble and non-QA text through a new `ChineseRecursiveTextSplitter` whose separators append `""`; continuation lines remain in the current QA until the next question marker.
+- Split preamble and non-QA text through a new `ChineseRecursiveTextSplitter` whose separators append `""`; continuation lines remain in the current QA until the next question marker. Treat all content before the first recognized answer marker as the question prefix, including loader-inserted line breaks.
 - Trim records before `len()` checks. For overlong QA, retain the question in every child and its recognized answer marker only in the first child.
 - Use one inner `ChineseRecursiveTextSplitter(chunk_size=chunk_size-len(first_prefix), chunk_overlap=chunk_overlap, separators=[*self._separators, ""])`; use the same strict separator list for fallback text and never mutate `self` sizing fields.
 - Only on the overlong path, raise `ValueError` when `len(first_prefix) + chunk_overlap >= chunk_size` and state that the operator must increase `chunk_size` or lower `chunk_overlap`.
@@ -53,6 +53,13 @@ def test_preamble_precedes_qa_and_answer_continuation_is_retained():
     splitter = QATextSplitter(chunk_size=200, chunk_overlap=0)
     assert splitter.split_text("intro\nQ: one\nA: first\nsecond") == [
         "intro", "Q: one\nA: first\nsecond"
+    ]
+
+
+def test_multiline_question_prefix_is_preserved_until_answer_marker():
+    splitter = QATextSplitter(chunk_size=200, chunk_overlap=0)
+    assert splitter.split_text("Q: 配置中心\n\n岗位权限\nA: 说明") == [
+        "Q: 配置中心\n\n岗位权限\nA: 说明"
     ]
 ```
 
@@ -223,15 +230,15 @@ Add beside the other local entries in `text_splitter_dict`:
 
 - [ ] **Step 3: Run complete regression and source inspection**
 
-Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest tests/custom_splitter/test_qa_text_splitter.py tests/custom_splitter/test_different_splitter.py -v`
+Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest tests/custom_splitter/test_qa_text_splitter.py -v`
 
-Expected: PASS.
+Expected: PASS. Do not include `test_different_splitter.py`: its module-level `transformers` import is unavailable in the `chatchat-v031` environment and would fail test collection independently of this feature.
 
 Run every Python and pytest command in this plan with `/Users/caomengdi/miniforge3/envs/chatchat-v031/bin/python` and `/Users/caomengdi/miniforge3/envs/chatchat-v031/bin/pytest`, respectively. For the source inspection run:
 
-Run: `cd libs/chatchat-server && /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/python -c 'from chatchat.server.knowledge_base.utils import KnowledgeFile; from chatchat.settings import Settings; Settings.kb_settings.TEXT_SPLITTER_NAME="QATextSplitter"; f=KnowledgeFile("test.docx", "司库test"); chunks=f.file2text(refresh=True, chunk_size=750, chunk_overlap=150); print(len(chunks))'`
+Run: `cd libs/chatchat-server && CHATCHAT_ROOT=/Users/caomengdi/chatchat-data /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/python -c 'from chatchat.server.knowledge_base.utils import KnowledgeFile; from chatchat.settings import Settings; Settings.kb_settings.TEXT_SPLITTER_NAME="QATextSplitter"; f=KnowledgeFile("test.docx", "司库test"); chunks=f.file2text(refresh=True, chunk_size=750, chunk_overlap=150); print(len(chunks))'`
 
-Expected: prints the observed chunk count without editing the DOCX or writing vectors. Verify that each source QA remains intact; report whether the observed count is seven rather than assuming it beforehand.
+Expected: prints the observed chunk count without editing the DOCX or writing vectors. The current source inspection has observed seven QA records; verify that result after implementation and report any discrepancy.
 
 - [ ] **Step 4: Commit settings and final tests**
 
