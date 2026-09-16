@@ -8,6 +8,8 @@ Preserve each question and its answer from structured QA documents as one vector
 
 Add a configurable `QATextSplitter` to the knowledge-base text splitters. The source DOCX remains unchanged. The feature takes effect when the knowledge base is rebuilt with `TEXT_SPLITTER_NAME` set to `QATextSplitter`.
 
+`RapidOCRDocLoader` can produce several LangChain `Document` objects for one source DOCX. To preserve QA pairs that span those loader objects, `QATextSplitter.split_documents` concatenates the consecutive documents it receives for one source file before applying QA parsing. It never combines documents from different sources.
+
 ## Input Format
 
 The splitter recognizes question and answer markers at the start of a line, with optional surrounding whitespace:
@@ -19,12 +21,17 @@ The question marker starts a new QA record. Its record ends immediately before t
 
 ## Splitting Behavior
 
-1. A QA record whose complete text fits within `chunk_size` becomes exactly one chunk containing its question and answer.
-2. For an overlong QA record, the question prefix is retained in every child chunk. Only the answer body is divided using the existing length and overlap settings.
-3. The leading text before the first recognized question marker is a preamble. It is independently delegated to the existing character-based splitter and is never attached to the first QA record.
-4. A mixed document is processed by segment: each QA record uses QA behavior, while the preamble uses the existing character-based splitter. A document without any recognized question marker wholly uses the existing splitter.
+1. A QA record whose complete text has `len(text) <= chunk_size` becomes exactly one chunk containing its question and answer.
+2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided by `ChineseRecursiveTextSplitter` with the configured length and overlap values. The `A:` or `A：` marker is retained only in the first child chunk.
+3. The leading text before the first recognized question marker is a preamble. It is independently delegated to `ChineseRecursiveTextSplitter` and is never attached to the first QA record.
+4. A mixed document is processed by segment: each QA record uses QA behavior, while the preamble uses `ChineseRecursiveTextSplitter`. A document without any recognized question marker wholly uses `ChineseRecursiveTextSplitter`.
 5. Empty or whitespace-only records are not emitted.
-6. `split_documents` preserves the metadata of the source document for every output chunk.
+6. Output order is the preamble chunks first, followed by QA chunks in source-document order.
+7. Output chunks retain the metadata of their source document.
+
+## Implementation Constraints
+
+`QATextSplitter` subclasses `ChineseRecursiveTextSplitter`, and therefore indirectly subclasses LangChain `TextSplitter`. It accepts arbitrary keyword arguments, including the `pipeline="zh_core_web_sm"` passed by `make_text_splitter`. It overrides `split_text` for QA-aware text splitting and `split_documents` solely to concatenate loader-produced documents with the same `source` before calling `split_text` and restoring their metadata.
 
 ## Configuration
 
@@ -45,8 +52,10 @@ Add focused tests that verify:
 - A long answer is split into multiple chunks and each includes the original question.
 - A source document without QA markers falls back to standard character splitting.
 - Preamble text in a mixed document is split separately and answer continuation lines remain in their preceding QA record.
+- Consecutive loader-produced documents from the same source are combined so a question and answer that were loaded separately become one QA chunk; different sources remain isolated.
+- Preamble chunks precede QA chunks; a long answer retains its question in every child and its answer marker only in the first child.
 - Source metadata is copied to emitted chunks.
 
 ## Operational Notes
 
-Existing vectors are not retroactively rewritten. After enabling the splitter, recreate the vector store for the target knowledge base to replace the existing chunks.
+Existing vectors are not retroactively rewritten. After enabling the splitter, restart the service so `make_text_splitter` clears its `lru_cache`, then recreate the vector store for the target knowledge base to replace the existing chunks.
