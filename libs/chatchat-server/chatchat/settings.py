@@ -222,6 +222,10 @@ class KBSettings(BaseFileSettings):
                 "source": "",
                 "tokenizer_name_or_path": "",
             },
+            "QATextSplitter": {
+                "source": "",
+                "tokenizer_name_or_path": "",
+            },
             "SpacyTextSplitter": {
                 "source": "huggingface",
                 "tokenizer_name_or_path": "gpt2",

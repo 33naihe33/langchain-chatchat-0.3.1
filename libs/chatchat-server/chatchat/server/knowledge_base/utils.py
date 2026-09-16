@@ -223,6 +223,10 @@ def make_text_splitter(splitter_name, chunk_size, chunk_overlap):
     根据参数获取特定的分词器
     """
     splitter_name = splitter_name or "SpacyTextSplitter"
+    splitter_config = Settings.kb_settings.text_splitter_dict.get(
+        splitter_name,
+        {"source": "", "tokenizer_name_or_path": ""},
+    )
     try:
         if (
             splitter_name == "MarkdownHeaderTextSplitter"
@@ -244,11 +248,11 @@ def make_text_splitter(splitter_name, chunk_size, chunk_overlap):
                 TextSplitter = getattr(text_splitter_module, splitter_name)
 
             if (
-                Settings.kb_settings.text_splitter_dict[splitter_name]["source"] == "tiktoken"
+                splitter_config["source"] == "tiktoken"
             ):  # 从tiktoken加载
                 try:
                     text_splitter = TextSplitter.from_tiktoken_encoder(
-                        encoding_name=Settings.kb_settings.text_splitter_dict[splitter_name][
+                        encoding_name=splitter_config[
                             "tokenizer_name_or_path"
                         ],
                         pipeline="zh_core_web_sm",
@@ -257,17 +261,17 @@ def make_text_splitter(splitter_name, chunk_size, chunk_overlap):
                     )
                 except:
                     text_splitter = TextSplitter.from_tiktoken_encoder(
-                        encoding_name=Settings.kb_settings.text_splitter_dict[splitter_name][
+                        encoding_name=splitter_config[
                             "tokenizer_name_or_path"
                         ],
                         chunk_size=chunk_size,
                         chunk_overlap=chunk_overlap,
                     )
             elif (
-                Settings.kb_settings.text_splitter_dict[splitter_name]["source"] == "huggingface"
+                splitter_config["source"] == "huggingface"
             ):  # 从huggingface加载
                 if (
-                    Settings.kb_settings.text_splitter_dict[splitter_name]["tokenizer_name_or_path"]
+                    splitter_config["tokenizer_name_or_path"]
                     == "gpt2"
                 ):
                     from langchain.text_splitter import CharacterTextSplitter
@@ -278,7 +282,7 @@ def make_text_splitter(splitter_name, chunk_size, chunk_overlap):
                     from transformers import AutoTokenizer
 
                     tokenizer = AutoTokenizer.from_pretrained(
-                        Settings.kb_settings.text_splitter_dict[splitter_name]["tokenizer_name_or_path"],
+                        splitter_config["tokenizer_name_or_path"],
                         trust_remote_code=True,
                     )
                 text_splitter = TextSplitter.from_huggingface_tokenizer(
