@@ -12,9 +12,9 @@
 
 - Do not modify the source DOCX or change the default `TEXT_SPLITTER_NAME`.
 - Support `Q/q/问` and `A/a/答` at line start, with `:` or `：` and optional whitespace.
-- Split preamble and non-QA text through a new `ChineseRecursiveTextSplitter` whose separators append `""`; continuation lines remain in the current QA until the next question marker. Treat all content before the first recognized answer marker as the question prefix, including loader-inserted line breaks.
+- Initialize `QATextSplitter` with its normal separator list plus `""`, so `super().split_text` handles preamble and non-QA text even without punctuation. Continuation lines remain in the current QA until the next question marker. Treat all content before the first recognized answer marker as the question prefix, including loader-inserted line breaks.
 - Trim records before `len()` checks. For overlong QA, retain the question in every child and its recognized answer marker only in the first child.
-- Use one inner `ChineseRecursiveTextSplitter(chunk_size=chunk_size-len(first_prefix), chunk_overlap=chunk_overlap, separators=[*self._separators, ""])`; use the same strict separator list for fallback text and never mutate `self` sizing fields.
+- Use one inner `ChineseRecursiveTextSplitter(chunk_size=chunk_size-len(first_prefix), chunk_overlap=chunk_overlap, separators=self._separators)`; never mutate `self` sizing fields.
 - Only on the overlong path, raise `ValueError` when `len(first_prefix) + chunk_overlap >= chunk_size` and state that the operator must increase `chunk_size` or lower `chunk_overlap`.
 - Group only consecutive documents having the same `metadata["source"]`; use one newline as joiner and copy the first document metadata to all resulting chunks.
 - Output preamble chunks first, then QA chunks in source order. After opt-in, restart the service and rebuild the vector store.
@@ -137,14 +137,18 @@ Expected: FAIL until production implementation exists.
 - [ ] **Step 1: Implement constructor and marker parsing**
 
 ```python
-QUESTION_MARKER = re.compile(r"^\s*(?:Q|q|问)\s*[:：]\s*", re.MULTILINE)
-ANSWER_MARKER = re.compile(r"^\s*(?:A|a|答)\s*[:：]\s*", re.MULTILINE)
+DEFAULT_QA_SEPARATORS = ["\n\n", "\n", "。|！|？", "\.\s|\!\s|\?\s", "；|;\s", "，|,\s", ""]
+QUESTION_MARKER = re.compile(r"^[ \t]*(?:Q|q|问)[ \t]*[:：][ \t]*", re.MULTILINE)
+ANSWER_MARKER = re.compile(r"^[ \t]*(?:A|a|答)[ \t]*[:：][ \t]*", re.MULTILINE)
 
 
 class QATextSplitter(ChineseRecursiveTextSplitter):
     def __init__(self, *args, **kwargs):
         kwargs.pop("pipeline", None)
-        super().__init__(*args, **kwargs)
+        separators = list(kwargs.pop("separators", DEFAULT_QA_SEPARATORS))
+        if "" not in separators:
+            separators.append("")
+        super().__init__(*args, separators=separators, **kwargs)
 ```
 
 - [ ] **Step 2: Implement `split_text` and overlong-record split**
@@ -163,14 +167,14 @@ def _split_record(self, record: str) -> List[str]:
     answer_chunks = ChineseRecursiveTextSplitter(
         chunk_size=self._chunk_size - len(first_prefix),
         chunk_overlap=self._chunk_overlap,
-        separators=[*self._separators, ""],
+        separators=self._separators,
     ).split_text(answer_body)
     if not answer_chunks:
         return [record]
     return [f"{first_prefix}{answer_chunks[0]}"] + [f"{question}\n{chunk}" for chunk in answer_chunks[1:]]
 ```
 
-Use a new `ChineseRecursiveTextSplitter` with `separators=[*self._separators, ""]` for no-QA and preamble text, and only invoke `_split_record` for question-started records.
+Use `super().split_text(text.strip())` for no-QA and preamble text, and only invoke `_split_record` for question-started records; the constructor has already installed the strict separator list.
 
 - [ ] **Step 3: Implement source grouping and module export**
 
@@ -200,7 +204,6 @@ git commit -m "feat: add QA text splitter"
 
 **Files:**
 - Modify: `libs/chatchat-server/chatchat/settings.py:220-247`
-- Test: `libs/chatchat-server/tests/custom_splitter/test_different_splitter.py`
 - Test: `/Users/caomengdi/chatchat-data/data/knowledge_base/司库test/content/test.docx`
 
 **Interfaces:**

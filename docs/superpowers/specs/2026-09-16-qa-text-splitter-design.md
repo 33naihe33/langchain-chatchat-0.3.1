@@ -32,7 +32,7 @@ The question marker starts a new QA record. Its record ends immediately before t
 
 ## Implementation Constraints
 
-`QATextSplitter` subclasses `ChineseRecursiveTextSplitter`, and therefore indirectly subclasses LangChain `TextSplitter`. It accepts arbitrary keyword arguments, including the `pipeline="zh_core_web_sm"` passed by `make_text_splitter`. It overrides `split_text` for QA-aware text splitting and `split_documents` solely to concatenate loader-produced documents with the same `source` before calling `split_text` and restoring their metadata. It constructs a new strict recursive splitter for fallback text and answer bodies with `separators=[*self._separators, ""]`, and never mutates `self._chunk_size` or `self._chunk_overlap`. An empty parsed answer body returns the stripped record intact rather than indexing an empty answer-chunk list.
+`QATextSplitter` subclasses `ChineseRecursiveTextSplitter`, and therefore indirectly subclasses LangChain `TextSplitter`. It accepts arbitrary keyword arguments, including the `pipeline="zh_core_web_sm"` passed by `make_text_splitter`. Its constructor appends `""` to the normal separator list before calling `super()`. It overrides `split_text` for QA-aware text splitting and `split_documents` solely to concatenate loader-produced documents with the same `source` before calling `split_text` and restoring their metadata. New inner splitters reuse `self._separators`, and no code mutates `self._chunk_size` or `self._chunk_overlap`. An empty parsed answer body returns the stripped record intact rather than indexing an empty answer-chunk list.
 
 ## Configuration
 
