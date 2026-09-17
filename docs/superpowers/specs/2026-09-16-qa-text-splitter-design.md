@@ -17,22 +17,22 @@ The splitter recognizes question and answer markers at the start of a line, with
 - Questions: `Q:`, `Q：`, `Q :`, `Q ：`, lowercase `q` variants, and `问` variants with either colon and optional spaces
 - Answers: `A:`, `A：`, `A :`, `A ：`, lowercase `a` variants, and `答` variants with either colon and optional spaces
 
-The question marker starts a new QA record. Its record ends immediately before the next question marker. Answer markers are retained as part of the record content. Every non-marker line after a question marker, including answer continuation lines and blank lines, belongs to the current QA record until the next question marker. For a record with an answer marker, the question prefix is all content before that answer marker, including any loader-inserted line breaks.
+The question marker starts a new QA record. Its record ends immediately before the next question marker. Answer markers are retained as part of the record content. Every non-marker line after a question marker, including answer continuation lines and blank lines, belongs to the current QA record until the next question marker. For a record with an answer marker, the question prefix is all content before that answer marker, including any loader-inserted line breaks. The question prefix keeps those interior line breaks but drops its own trailing whitespace, so a reconstructed chunk places exactly one newline between the question and the answer marker. A record without an answer marker has no question prefix or answer body.
 
 ## Splitting Behavior
 
 1. Each record is trimmed with `strip()` before any emptiness or length check. A QA record whose complete trimmed text has `len(text) <= chunk_size` becomes exactly one chunk containing its question and answer.
-2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided once by a new `ChineseRecursiveTextSplitter` instance with the configured overlap and a uniform budget of `chunk_size - len(first_prefix)`, where `first_prefix` is `question + "\n" + answer_marker + "\n"`. This conservative budget ensures both the first child and the later, shorter-prefixed children remain within `chunk_size`. The recognized answer marker is retained only in the first child chunk.
+2. For an overlong QA record, the question prefix is retained in every child chunk. The answer body is divided once by a new `ChineseRecursiveTextSplitter` instance with the configured overlap and a uniform budget of `chunk_size - len(first_prefix)`, where `first_prefix` is `question + "\n" + answer_marker + "\n"`. This conservative budget ensures both the first child and the later, shorter-prefixed children remain within `chunk_size`. The recognized answer marker is retained only in the first child chunk. An overlong record that contains no answer marker has no question prefix to retain: it is delegated whole to the strict recursive splitter exactly like the preamble and never raises.
 3. Only for a record that actually requires answer-body splitting under rule 2, the splitter raises `ValueError` with an instruction to increase `chunk_size` or lower `chunk_overlap` if `len(first_prefix) + chunk_overlap >= chunk_size`. Records emitted intact under rule 1 are exempt. This avoids silently emitting an over-limit chunk, dropping the question, or constructing an inner splitter whose overlap is not smaller than its chunk budget.
 4. The leading text before the first recognized question marker is a preamble. It is independently delegated to a `ChineseRecursiveTextSplitter` constructed with its normal separators plus a final empty-string separator, and is never attached to the first QA record.
 5. A mixed document is processed by segment: each QA record uses QA behavior, while the preamble uses that strict recursive splitter. A document without any recognized question marker wholly uses that strict recursive splitter. The same explicit empty-string separator fallback is used by the inner answer-body splitter, guaranteeing no emitted chunk exceeds `chunk_size`.
 6. Empty or whitespace-only records are not emitted.
 7. Output order is the preamble chunks first, followed by QA chunks in source-document order.
-8. Output chunks retain the metadata of their source document. When multiple loader-produced documents from one source are concatenated, output chunks copy the first document's metadata; later conflicting values (such as page number) are not merged.
+8. Output chunks retain the metadata of their source document. When multiple loader-produced documents from one source are concatenated, output chunks copy the first document's metadata; later conflicting values (such as page number) are not merged. Documents whose metadata lacks a `source` are never concatenated; each is split on its own.
 
 ## Implementation Constraints
 
-`QATextSplitter` subclasses `ChineseRecursiveTextSplitter`, and therefore indirectly subclasses LangChain `TextSplitter`. It accepts arbitrary keyword arguments, including the `pipeline="zh_core_web_sm"` passed by `make_text_splitter`. Its constructor appends `""` to the normal separator list before calling `super()`. It overrides `split_text` for QA-aware text splitting and `split_documents` solely to concatenate loader-produced documents with the same `source` before calling `split_text` and restoring their metadata. New inner splitters reuse `self._separators`, and no code mutates `self._chunk_size` or `self._chunk_overlap`. An empty parsed answer body returns the stripped record intact rather than indexing an empty answer-chunk list.
+`QATextSplitter` subclasses `ChineseRecursiveTextSplitter`, and therefore indirectly subclasses LangChain `TextSplitter`. It accepts arbitrary keyword arguments, including the `pipeline="zh_core_web_sm"` passed by `make_text_splitter`. Its constructor appends `""` to the normal separator list before calling `super()`. It overrides `split_text` for QA-aware text splitting and `split_documents` solely to concatenate loader-produced documents with the same `source` before calling `split_text` and restoring their metadata. Question and answer parsing is factored into `_parse_question_and_answer(record)`, which returns `(question, answer_marker, answer_body)` from the first answer-marker match, with `question = record[:match.start()].rstrip()`, or `(record, None, "")` when the record has no answer marker; a `None` marker routes the record to the strict recursive splitter. `split_documents` reads the grouping key with `metadata.get("source")`. New inner splitters reuse `self._separators`, and no code mutates `self._chunk_size` or `self._chunk_overlap`. An empty parsed answer body returns the stripped record intact rather than indexing an empty answer-chunk list.
 
 ## Configuration
 
@@ -42,7 +42,7 @@ Register `QATextSplitter` in `text_splitter_dict` with the existing local splitt
 TEXT_SPLITTER_NAME = "QATextSplitter"
 ```
 
-The default splitter remains unchanged to avoid altering existing knowledge bases unexpectedly.
+The default splitter remains unchanged to avoid altering existing knowledge bases unexpectedly. `make_text_splitter` reads each entry with a `dict.get(name, {"source": "", "tokenizer_name_or_path": ""})` fallback, so a local splitter exported from `chatchat.server.file_rag.text_splitter` is constructed even when its `text_splitter_dict` entry is missing; the registration above remains the documented convention, and the previous behavior of silently returning `RecursiveCharacterTextSplitter` for a missing local entry no longer occurs.
 
 ## Tests
 
@@ -52,6 +52,8 @@ Add focused tests that verify:
 - Lowercase `q:/a:` and Chinese `问：/答：` markers form QA chunks.
 - A short QA is emitted intact as one chunk.
 - A long answer is split into multiple chunks and each includes the original question.
+- An overlong record without an answer marker is split by the strict recursive splitter, emits no question-prefixed children, and does not raise.
+- An overlong record with a multiline question retains the question's interior line breaks in every child chunk.
 - A source document without QA markers falls back to standard character splitting.
 - Preamble text in a mixed document is split separately and answer continuation lines remain in their preceding QA record.
 - Consecutive loader-produced documents from the same source are combined so a question and answer that were loaded separately become one QA chunk; different sources remain isolated.
@@ -62,6 +64,7 @@ Add focused tests that verify:
 - An overlong QA record whose question prefix plus overlap exhausts the chunk budget raises `ValueError` with a clear recovery message; a complete, short QA with the same prefix does not.
 - Source metadata is copied to emitted chunks.
 - Concatenated documents with conflicting metadata use the first document's metadata.
+- Documents without a `source` are split individually and never concatenated.
 
 ## Operational Notes
 
