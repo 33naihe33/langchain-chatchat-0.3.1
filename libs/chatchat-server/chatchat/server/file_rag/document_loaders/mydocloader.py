@@ -70,7 +70,10 @@ class RapidOCRDocLoader(UnstructuredFileLoader):
         text = doc2text(self.file_path)
         from unstructured.partition.text import partition_text
 
-        return partition_text(text=text, **self.unstructured_kwargs)
+        # unstructured 把 ASCII "-" 当 bullet 字符，auto_paragraph_grouper 会在空行占比高的
+        # 文本里把每个 "-" 前后切成换行（如图片占位符 1-1-1_1.png 被打断），故跳过该分组器
+        kwargs = {"paragraph_grouper": False, **self.unstructured_kwargs}
+        return partition_text(text=text, **kwargs)
 
 
 if __name__ == "__main__":
