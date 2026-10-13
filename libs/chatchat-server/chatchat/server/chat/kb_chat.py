@@ -8,7 +8,7 @@ from typing import AsyncIterable, List, Optional, Literal
 from fastapi import Body, Request
 from fastapi.concurrency import run_in_threadpool
 from sse_starlette.sse import EventSourceResponse
-from langchain.callbacks import AsyncIteratorCallbackHandler
+from chatchat.server.callback_handler.kb_reasoning_callback import KBReasoningCallbackHandler
 from langchain.prompts.chat import ChatPromptTemplate
 
 
@@ -111,7 +111,7 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
             ) .model_dump_json()
             return
 
-        callback = AsyncIteratorCallbackHandler()
+        callback = KBReasoningCallbackHandler()
         callbacks = [callback]
 
         # Enable langchain-chatchat to support langfuse
@@ -178,19 +178,20 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
             )
             yield ret.model_dump_json()
 
-            async for token in callback.aiter():
+            async for piece in callback.aiter():
                 ret = OpenAIChatOutput(
                     id=f"chat{uuid.uuid4()}",
                     object="chat.completion.chunk",
-                    content=token,
+                    content=piece["content"],
+                    reasoning_content=piece["reasoning_content"],
                     role="assistant",
                     model=model,
                 )
                 yield ret.model_dump_json()
         else:
             answer = ""
-            async for token in callback.aiter():
-                answer += token
+            async for piece in callback.aiter():
+                answer += piece["content"]
             ret = OpenAIChatOutput(
                 id=f"chat{uuid.uuid4()}",
                 object="chat.completion",

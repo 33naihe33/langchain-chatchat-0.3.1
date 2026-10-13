@@ -123,6 +123,7 @@ class OpenAIBaseOutput(BaseModel):
     finish_reason: Optional[str] = None
     created: int = Field(default_factory=lambda: int(time.time()))
     tool_calls: List[Dict] = []
+    reasoning_content: Optional[str] = None
 
     status: Optional[int] = None  # AgentStatus
     message_type: int = MsgType.TEXT
@@ -146,12 +147,15 @@ class OpenAIBaseOutput(BaseModel):
         }
 
         if self.object == "chat.completion.chunk":
+            delta = {
+                "content": self.content,
+                "tool_calls": self.tool_calls,
+            }
+            if self.reasoning_content:
+                delta["reasoning_content"] = self.reasoning_content
             result["choices"] = [
                 {
-                    "delta": {
-                        "content": self.content,
-                        "tool_calls": self.tool_calls,
-                    },
+                    "delta": delta,
                     "role": self.role,
                 }
             ]

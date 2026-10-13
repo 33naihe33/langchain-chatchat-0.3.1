@@ -232,7 +232,9 @@ def get_ChatOpenAI(
                 openai_api_key=model_info.get("api_key"),
                 openai_proxy=model_info.get("api_proxy"),
             )
-        model = ChatOpenAI(**params)
+        from chatchat.server.reasoning_chat_openai import ReasoningChatOpenAI
+        model_class = ReasoningChatOpenAI if model_info.get("platform_type") == "custom openai" else ChatOpenAI
+        model = model_class(**params)
     except Exception as e:
         logger.error(
             f"failed to create ChatOpenAI for model: {model_name}.", exc_info=True

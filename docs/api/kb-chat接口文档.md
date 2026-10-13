@@ -54,17 +54,19 @@
 ### 事件顺序
 
 1. 第一个事件：`choices[0].delta.content` 为空，`docs` 包含检索到的来源。
-2. 中间事件：每个事件包含一小段增量文本，位于 `choices[0].delta.content`。
+2. 中间事件：每个事件可包含一小段 `choices[0].delta.content`，也可在模型产生非空推理文本时包含独立的 `choices[0].delta.reasoning_content`；两者可同时出现，也可单独出现。
 3. 服务端在生成完成后关闭连接。当前实现**不会**发送 OpenAI 风格的 `[DONE]` 事件；前端应以流读取结束作为完成信号。
+
+`reasoning_content` 只会作为 `choices[0].delta` 内的可选显式字段出现，不能放在事件顶层（顶层 `docs` 仍只表示引用）。客户端应将它与 `content` 分开呈现或保存，不能将它并入最终回答，也不能假定每个事件都有其中任一字段。`stream: false` 返回的 `object: "chat.completion"` 不输出 `reasoning_content`。
 
 示例：
 
 ```text
-data: {"id":"chat...","object":"chat.completion.chunk","model":"minicpm5-2b","choices":[{"delta":{"content":"","tool_calls":[]},"role":"assistant"}],"docs":["出处 [1] ..."]}
+data: {"id":"chat...","object":"chat.completion.chunk","model":"MiniCPM5-2B","choices":[{"delta":{"content":"","tool_calls":[]},"role":"assistant"}],"docs":["出处 [1] ..."]}
 
-data: {"id":"chat...","object":"chat.completion.chunk","model":"minicpm5-2b","choices":[{"delta":{"content":"资金","tool_calls":[]},"role":"assistant"}]}
+data: {"id":"chat...","object":"chat.completion.chunk","model":"MiniCPM5-2B","choices":[{"delta":{"content":"","reasoning_content":"先判断当前资金缺口。","tool_calls":[]},"role":"assistant"}]}
 
-data: {"id":"chat...","object":"chat.completion.chunk","model":"minicpm5-2b","choices":[{"delta":{"content":"头寸管理","tool_calls":[]},"role":"assistant"}]}
+data: {"id":"chat...","object":"chat.completion.chunk","model":"MiniCPM5-2B","choices":[{"delta":{"content":"资金头寸管理","tool_calls":[]},"role":"assistant"}]}
 ```
 
 来源字段 `docs` 是格式化后的 Markdown/HTML 文本，可能包含文档名、链接和文档片段。定制前端应将其作为引用信息展示；渲染 HTML 前须进行可信内容控制或净化。
@@ -121,7 +123,9 @@ await streamKnowledgeBaseAnswer(
   { query: '请介绍司库资金头寸管理流程', kbName: 'treasury' },
   (event) => {
     if (event.docs) references = event.docs;
-    answer += event.choices?.[0]?.delta?.content ?? '';
+    const delta = event.choices?.[0]?.delta ?? {};
+    answer += delta.content ?? '';
+    // 如需展示推理过程，单独保存/渲染 delta.reasoning_content；不要并入 answer。
     renderAnswer(answer, references);
   },
 );
@@ -175,7 +179,7 @@ location = /chat/kb_chat {
 
 ## 8. 验收命令
 
-用以下命令确认首个引用事件与后续文本增量能实时输出：
+用以下命令确认首个引用事件与后续文本增量能实时输出；上游模型产生推理文本时，必须还能观察到独立的 `choices[0].delta.reasoning_content` 事件，才算完成本次透传验收。
 
 ```bash
 curl --no-buffer -X POST 'http://127.0.0.1:7861/chat/kb_chat' \

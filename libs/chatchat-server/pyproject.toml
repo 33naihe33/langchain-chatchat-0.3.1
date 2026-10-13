@@ -232,6 +232,7 @@ markers = [
     "compile: mark placeholder test used to compile integration tests without running them"
 ]
 asyncio_mode = "auto"
+pythonpath = ["."]
 
 
 [tool.codespell]
