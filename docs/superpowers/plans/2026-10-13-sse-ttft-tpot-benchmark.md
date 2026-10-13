@@ -15,7 +15,7 @@
 - 请求体固定使用 `mode=local_kb`、`stream=true`、`max_tokens=512`、`top_k=3`、`score_threshold=1.0`、`temperature=0`。
 - TTFT 是请求前单调时钟到首个非空 `delta.content`；TPOT 是 `(EOF - first_content)/max(tokens-1, 1)`。
 - `/tokenize` 请求固定为 `{"content": answer, "add_special": false}`；失败只影响 `tpot_success`。
-- 默认保存 `output_chars`、SHA-256，不保存正文；`--include-output` 才保存全文。
+- 默认输出文件为 `data/benchmarks/<timestamp>.jsonl`，保存 `output_tokens`、`output_chars`、SHA-256，不保存正文；`--include-output` 才保存全文。
 
 ---
 
@@ -39,6 +39,7 @@
 - [ ] **Step 1: 写入失败测试**
 
 ```python
+import pytest
 from scripts.benchmark_sse import calculate_tpot, iter_sse_data, summarize
 
 def test_parser_ignores_ping_and_handles_chunk_boundary():
@@ -46,7 +47,7 @@ def test_parser_ignores_ping_and_handles_chunk_boundary():
     assert list(iter_sse_data(chunks)) == ['{"a":1}', '{"a":2}']
 
 def test_tpot_uses_generated_intervals():
-    assert calculate_tpot(1.0, 1.3, 4) == 0.1
+    assert calculate_tpot(1.0, 1.3, 4) == pytest.approx(0.1)
 
 def test_summary_has_independent_populations():
     rows = [{"chat_success": True, "ttft_ms": 10, "tpot_success": True, "tpot_ms": 5}, {"chat_success": True, "ttft_ms": 30, "tpot_success": False}]
@@ -64,15 +65,21 @@ Expected: FAIL，模块 `scripts.benchmark_sse` 尚不存在。
 
 ```python
 def iter_sse_data(chunks):
+    decoder = codecs.getincrementaldecoder("utf-8")()
     buffer = ""
     for chunk in chunks:
-        buffer += chunk.decode("utf-8")
+        buffer += decoder.decode(chunk)
         events = buffer.replace("\r\n", "\n").split("\n\n")
         buffer = events.pop()
         for event in events:
             data = [line[5:].lstrip() for line in event.split("\n") if line.startswith("data:")]
             if data:
                 yield "\n".join(data)
+    buffer += decoder.decode(b"", final=True)
+    if buffer:
+        data = [line[5:].lstrip() for line in buffer.replace("\r\n", "\n").split("\n") if line.startswith("data:")]
+        if data:
+            yield "\n".join(data)
 
 def calculate_tpot(first_content_at, eof_at, token_count):
     return (eof_at - first_content_at) / max(token_count - 1, 1)
@@ -155,9 +162,9 @@ Expected: 返回 `MiniCPM5-2B` 与 `bge-m3`。
 
 - [ ] **Step 2: 运行轻量基准**
 
-Run: `conda run -n chatchat-v031 python scripts/benchmark_sse.py --query '请简述资金头寸管理。' --kb-name samples --runs 1 --warmups 1 --max-tokens 64 --output /tmp/minicpm5-benchmark.jsonl`
+Run: `curl --fail http://127.0.0.1:7861/knowledge_base/list_knowledge_bases && conda run -n chatchat-v031 python scripts/benchmark_sse.py --query '请简述资金头寸管理。' --kb-name '司库test' --runs 1 --warmups 1 --max-tokens 64 --output /tmp/minicpm5-benchmark.jsonl`
 
-Expected: stdout 和 JSONL 都含测量记录与汇总记录；若 `samples` 不存在，报告外部前提，不伪造成功。
+Expected: 列表包含 `司库test`；stdout 和 JSONL 都含一条 `chat_success=true`、`tpot_success=true` 的测量记录及一条汇总记录。
 
 - [ ] **Step 3: 核对汇总**
 
@@ -177,11 +184,11 @@ git commit -m "fix: harden SSE benchmark runtime handling"
 The following corrections supersede the earlier snippets where they conflict.
 
 - Create `scripts/__init__.py`; tests run from repo root via `conda run -n chatchat-v031 python -m pytest tests/test_benchmark_sse.py -v`.
-- `iter_sse_data` uses `codecs.getincrementaldecoder("utf-8")()` and never calls `chunk.decode("utf-8")`; add a test splitting the UTF-8 bytes for “资金” across chunks.
+- `iter_sse_data` uses `codecs.getincrementaldecoder("utf-8")()` and never calls `chunk.decode("utf-8")`; add a test splitting the UTF-8 bytes for “资金” across chunks. After decoding the final bytes, it must also parse a non-empty trailing buffer as one final event.
 - Import pytest and assert TPOT with `pytest.approx(0.1)`.
 - `summarize` first excludes `is_warmup=true`; test this. Define P50 as the lower median and emit `p50_method: "lower_median"`.
 - Define all test fixtures/helpers (`args`, response double, fake streaming post, malformed stream, tokenizer error) in the test module.
 - Add separate `requests.ConnectTimeout` and `requests.ReadTimeout` tests; both mark chat and TPOT unsuccessful with distinct `chat_error` values.
-- `count_tokens` calls `raise_for_status()` and requires list-valued `tokens`; all token endpoint failures only set `tpot_success=false` and `tpot_error`.
-- Every record includes UTC `started_at`, `generation_duration_ms`, `request_params`, `output_chars`, and `output_sha256`; add `output_text` only with `--include-output`.
+- `count_tokens` calls `raise_for_status()`, uses the same `(connect_timeout, read_timeout)` pair as the chat request, and requires list-valued `tokens`; all token endpoint failures only set `tpot_success=false` and `tpot_error`.
+- Every record includes UTC `started_at`, `generation_duration_ms`, `request_params`, `output_tokens`, `output_chars`, and `output_sha256`; add `output_text` only with `--include-output`.
 
