@@ -64,6 +64,8 @@ Expected: FAIL，模块 `scripts.benchmark_sse` 尚不存在。
 - [ ] **Step 3: 编写最小实现**
 
 ```python
+import codecs
+
 def iter_sse_data(chunks):
     decoder = codecs.getincrementaldecoder("utf-8")()
     buffer = ""
@@ -85,10 +87,11 @@ def calculate_tpot(first_content_at, eof_at, token_count):
     return (eof_at - first_content_at) / max(token_count - 1, 1)
 
 def summarize(records):
+    records = [row for row in records if not row.get("is_warmup")]
     def metric(key, flag):
         values = sorted(row[key] for row in records if row.get(flag))
         return {"sample_count": len(values), "mean": sum(values) / len(values) if values else None, "p50": values[(len(values)-1)//2] if values else None, "min": values[0] if values else None, "max": values[-1] if values else None}
-    return {"record_type": "summary", "ttft": metric("ttft_ms", "chat_success"), "tpot": metric("tpot_ms", "tpot_success")}
+    return {"record_type": "summary", "p50_method": "lower_median", "ttft": metric("ttft_ms", "chat_success"), "tpot": metric("tpot_ms", "tpot_success")}
 ```
 
 - [ ] **Step 4: 验证通过并提交**
@@ -136,7 +139,7 @@ Expected: FAIL，`run_once` 和 `count_tokens` 未定义。
 
 - [ ] **Step 3: 编写最小实现**
 
-实现所有 spec 列出的 argparse 参数。聊天调用使用 `requests.post(..., stream=True, timeout=(connect_timeout, read_timeout))`；在调用前立即取 `started`，从 `iter_sse_data(response.iter_content(chunk_size=None))` 解析 JSON，在首个非空内容取 `first_content_at`，响应体结束时取 `eof_at`。实现 `count_tokens`，向 `/tokenize` 发送规定请求体。聊天失败写 `chat_error`；仅计数失败写 `tpot_error`。每一轮同时向 stdout 与 JSONL 写 `json.dumps(..., ensure_ascii=False)`；用 `Path(...).parent.mkdir(parents=True, exist_ok=True)` 建目录，正文以 SHA-256 摘要代替，除非 `--include-output`。
+实现所有 spec 列出的 argparse 参数。聊天与 `/tokenize` 调用均使用 `timeout=(connect_timeout, read_timeout)`；在聊天调用前立即取 `started`，从 `iter_sse_data(response.iter_content(chunk_size=None))` 解析 JSON，在首个非空内容取 `first_content_at`，响应体结束时取 `eof_at`。`count_tokens` 向 `/tokenize` 发送规定请求体，调用 `raise_for_status()` 并验证 `tokens` 为列表。聊天失败写 `chat_error`；仅计数失败写 `tpot_error`。每一轮同时向 stdout 与 JSONL 写 `json.dumps(..., ensure_ascii=False)`；记录 UTC `started_at`、`generation_duration_ms`、`request_params`、`output_tokens`、`output_chars` 与 SHA-256 摘要，用 `Path(...).parent.mkdir(parents=True, exist_ok=True)` 建目录；仅 `--include-output` 时保存正文。
 
 - [ ] **Step 4: 验证通过并提交**
 
