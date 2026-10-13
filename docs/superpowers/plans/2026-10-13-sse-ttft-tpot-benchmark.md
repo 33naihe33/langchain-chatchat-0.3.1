@@ -21,8 +21,9 @@
 
 ## File Structure
 
+- Create: `scripts/__init__.py` — 使根目录 `scripts` 成为显式 Python 包。
 - Create: `scripts/benchmark_sse.py` — CLI、SSE/统计函数、HTTP 调用和 JSONL 写入。
-- Create: `tests/test_benchmark_sse.py` — 无网络单元测试。
+- Create: `tests/test_benchmark_sse.py` — 无网络单元测试。测试命令必须从仓库根目录以 `python -m pytest` 执行，保证根目录位于 `sys.path`。
 
 ### Task 1: 实现纯度量逻辑
 
@@ -170,4 +171,17 @@ Expected: `ttft` 与 `tpot` 均有独立样本数；成功时指标为非负。
 git add scripts/benchmark_sse.py tests/test_benchmark_sse.py
 git commit -m "fix: harden SSE benchmark runtime handling"
 ```
+
+## Review Corrections
+
+The following corrections supersede the earlier snippets where they conflict.
+
+- Create `scripts/__init__.py`; tests run from repo root via `conda run -n chatchat-v031 python -m pytest tests/test_benchmark_sse.py -v`.
+- `iter_sse_data` uses `codecs.getincrementaldecoder("utf-8")()` and never calls `chunk.decode("utf-8")`; add a test splitting the UTF-8 bytes for “资金” across chunks.
+- Import pytest and assert TPOT with `pytest.approx(0.1)`.
+- `summarize` first excludes `is_warmup=true`; test this. Define P50 as the lower median and emit `p50_method: "lower_median"`.
+- Define all test fixtures/helpers (`args`, response double, fake streaming post, malformed stream, tokenizer error) in the test module.
+- Add separate `requests.ConnectTimeout` and `requests.ReadTimeout` tests; both mark chat and TPOT unsuccessful with distinct `chat_error` values.
+- `count_tokens` calls `raise_for_status()` and requires list-valued `tokens`; all token endpoint failures only set `tpot_success=false` and `tpot_error`.
+- Every record includes UTC `started_at`, `generation_duration_ms`, `request_params`, `output_chars`, and `output_sha256`; add `output_text` only with `--include-output`.
 
