@@ -4,14 +4,14 @@
 
 **Goal:** 为 `/chat/kb_chat` 的 SSE 回答提供可复测、可落盘的 TTFT 与 TPOT 命令行基准工具。
 
-**Architecture:** `scripts/benchmark_sse.py` 以 `requests` 串行调用 SSE，并使用 `time.perf_counter()` 记录首个有效文本和正常 EOF。纯函数处理 SSE 分帧、token 计数与统计；网络层注入这些函数，测试通过 mock 响应覆盖。
+**Architecture:** `scripts/benchmark_sse.py` 以 `requests` 调用 SSE，并使用 `time.perf_counter()` 记录首个有效文本和正常 EOF。标准库线程池提供可配置的并发上限，默认串行；纯函数处理 SSE 分帧、token 计数与统计，测试通过 mock 响应和同步原语覆盖。
 
 **Tech Stack:** Python 3.8+、标准库、项目既有 `requests`、pytest。
 
 ## Global Constraints
 
 - 默认地址：聊天 `http://127.0.0.1:7861/chat/kb_chat`；计数 `http://127.0.0.1:8080/tokenize`。
-- 默认预热 2 次、测量 5 次，所有请求严格串行。
+- 默认预热 2 次、测量 5 次，`--concurrency` 默认为 1（串行）；预热与正式阶段不重叠。
 - 请求体固定使用 `mode=local_kb`、`stream=true`、`max_tokens=512`、`top_k=3`、`score_threshold=1.0`、`temperature=0`。
 - TTFT 是请求前单调时钟到首个非空 `delta.content`；TPOT 是 `(EOF - first_content)/max(tokens-1, 1)`。
 - `/tokenize` 请求固定为 `{"content": answer, "add_special": false}`；失败只影响 `tpot_success`。
@@ -194,4 +194,28 @@ The following corrections supersede the earlier snippets where they conflict.
 - Add separate `requests.ConnectTimeout` and `requests.ReadTimeout` tests; both mark chat and TPOT unsuccessful with distinct `chat_error` values.
 - `count_tokens` calls `raise_for_status()`, uses the same `(connect_timeout, read_timeout)` pair as the chat request, and requires list-valued `tokens`; all token endpoint failures only set `tpot_success=false` and `tpot_error`.
 - Every record includes UTC `started_at`, `generation_duration_ms`, `request_params`, `output_tokens`, `output_chars`, and `output_sha256`; add `output_text` only with `--include-output`.
+- Validate `choices[0].delta` and nullable/string `content` before reading it; invalid response schemas fail only the current run. Tokenizer JSON must be an object with list-valued `tokens`. Close both HTTP responses in `finally`, including protocol and HTTP errors.
+- Validate `runs > 0`, `warmups >= 0`, `max_tokens > 0`, and finite positive timeouts before requests or file creation; invalid arguments exit with code 2.
+- Preserve the EOF-based metric formula. It measures client-visible正文 latency, includes reasoning before正文 in TTFT and tail overhead in TPOT, and is not native model decode timing; see the updated spec for reproducibility and completion-detection limits.
+
+## 首 token 与首正文延迟扩展（2026-10-14，用户已确认）
+
+沿用现有脚本、测试与方案，不增加依赖或修改服务端。
+
+- [x] 在 `tests/test_benchmark_sse.py` 添加确定时钟测试：请求在 1 秒，首思考在 1.1 秒，首正文在 1.2 秒，EOF 在 1.5 秒。断言 `first_token_ttft_ms=100`、`ttft_ms=200`，原 TPOT 保持 100ms。
+- [x] 覆盖仅正文、同事件双字段、缺省/null/空思考字段、思考-only 无正文失败、协议字段类型错误、计数失败保留两项延迟、旧记录汇总与预热排除。
+- [x] 执行 `LC_ALL=en_US.UTF-8 /Users/caomengdi/miniforge3/envs/chatchat-v031/bin/python -m pytest tests/test_benchmark_sse.py -q`，确认新增断言失败。
+- [x] 在 `run_once` 初始化 `first_token_ttft_ms=None` 与 `first_token_at=None`。校验 nullable/string `delta.reasoning_content`；首次任一字段非空时记录 `first_token_at`，同事件的首正文复用该时间。正常 EOF 且正文非空后写入新指标；失败轮次保留 null。
+- [x] 在 `summarize` 新增 `first_token_ttft`，继续使用 `chat_success` 和预热排除规则；缺失/为 null 的新字段不进入统计，兼容旧记录。
+- [x] 同步现有 spec，明确首 token 可为思考 token，该延迟不等于关闭思考后的正文延迟；正文输出、tokenize 入参和 TPOT 公式保持不变。
+- [x] 重跑全部相关测试，并执行 `git diff --check`；不将缺少真实服务下的单元测试称为端到端验证。
+
+## 可配置并发扩展（2026-10-14）
+
+用户要求测试脚本支持并发参数。复用 `run_once`，不改变计时公式，不修改模型服务。
+
+- [x] 添加 Barrier/Lock 同步测试，验证并发 2、预热阶段完整结束、失败轮次独立统计、运行序号顺序与 JSONL 输出；默认并发 1 保留串行行为，非法并发值在创建文件前被拒绝。确认新测试失败。
+- [x] 添加 `--concurrency`，默认 1，必须为正整数。在标准库 `ThreadPoolExecutor(max_workers=args.concurrency)` 中用 `executor.map(run_once, repeat(args), repeat(is_warmup), indexes)` 分别执行预热和正式阶段；每阶段输出完成后才提交下一阶段，按运行序号由主线程写入 JSONL。
+- [x] 单轮记录及汇总均保存 `concurrency`。`runs`、`warmups` 均表示阶段总轮数，实际同时执行数量最多为该阶段轮数与 concurrency 的较小值；每个工作线程执行完整聊天和 tokenize 流程。
+- [x] 更新现有 spec 并执行相关 pytest、CLI 帮助与差异检查；在本机服务仍可用时进行一次并发 2 的真实验证并单独保存结果。
 
