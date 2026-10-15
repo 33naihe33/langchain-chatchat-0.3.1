@@ -1,5 +1,7 @@
 # SSE TTFT / TPOT 基准测试脚本设计
 
+> 本文保留初版设计及后续单模式扩展记录。2026-10-15 已调整为 model/rag 两种摸底模式，现行默认轮数、采样、分组统计和自动报告以 [模型与 RAG 测试说明](../../benchmarks/model-rag-benchmark.md) 为准；下文的 5 次默认和不输出 P95 等初版约定不再代表现行脚本。
+
 ## 目标
 
 为现有 `POST /chat/kb_chat` SSE 接口提供一个命令行基准脚本，在预热后测量 MiniCPM5-2B 的**用户可见**响应延迟（TTFT 与 TPOT）。

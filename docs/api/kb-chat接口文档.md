@@ -41,6 +41,7 @@
 | `stream` | boolean | 否 | `true` | `true` 返回 SSE；`false` 返回单个 JSON 回答。 |
 | `model` | string | 否 | 服务端默认 LLM | 模型名称，必须与 `model_settings.yaml` 中的名称完全一致（当前为 `MiniCPM5-2B`，区分大小写）。 |
 | `temperature` | number | 否 | 服务端 `TEMPERATURE` 配置 | 采样温度，范围 `0`–`2`。知识库问答建议 `0.1`–`0.3`。 |
+| `top_p` | number 或 `null` | 否 | `null` | 核采样概率，范围 `0 < top_p <= 1`；提供时透传到模型调用，不提供时沿用模型服务默认值。摸底测试的采样参数不代表已确定的生产参数。 |
 | `max_tokens` | integer 或 `null` | 否 | 服务端 `MAX_TOKENS` 配置 | 单次最大生成 Token 数；`null` 表示使用模型最大值。 |
 | `prompt_name` | string | 否 | `default` | `prompt_settings.yaml` 中的 RAG 提示词模板名。 |
 | `return_direct` | boolean | 否 | `false` | `true` 时只返回检索来源，不调用大语言模型。 |

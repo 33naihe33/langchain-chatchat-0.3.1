@@ -46,6 +46,7 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                 stream: bool = Body(True, description="流式输出"),
                 model: str = Body(get_default_llm(), description="LLM 模型名称。"),
                 temperature: float = Body(Settings.model_settings.TEMPERATURE, description="LLM 采样温度", ge=0.0, le=2.0),
+                top_p: Optional[float] = Body(None, description="核采样概率；不提供时沿用模型服务默认值", gt=0.0, le=1.0),
                 max_tokens: Optional[int] = Body(
                     Settings.model_settings.MAX_TOKENS,
                     description="限制LLM生成Token数量，默认None代表模型最大值"
@@ -130,6 +131,7 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
             temperature=temperature,
             max_tokens=max_tokens,
             callbacks=callbacks,
+            **({"model_kwargs": {"top_p": top_p}} if top_p is not None else {}),
         )
         # TODO： 视情况使用 API
         # # 加入reranker

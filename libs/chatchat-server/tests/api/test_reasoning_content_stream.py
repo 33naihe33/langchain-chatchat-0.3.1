@@ -197,7 +197,8 @@ def kb_chat_module(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
-async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream, kb_chat_module):
+@pytest.mark.parametrize("top_p", [None, 0.95])
+async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream, top_p, kb_chat_module):
     pieces = [
         ("", "think"),
         ("answer", "more thought"),
@@ -237,6 +238,10 @@ async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream,
 
     def fake_model_factory(**kwargs):
         nonlocal callback
+        if top_p is None:
+            assert "model_kwargs" not in kwargs
+        else:
+            assert kwargs["model_kwargs"] == {"top_p": top_p}
         callback = kwargs["callbacks"][0]
         return object()
 
@@ -252,6 +257,7 @@ async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream,
         stream=stream,
         model="test",
         temperature=0,
+        top_p=top_p,
         max_tokens=32,
         prompt_name="default",
         return_direct=False,
@@ -272,3 +278,41 @@ async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream,
         event = json.loads(response)
         assert event["choices"][0]["message"]["content"] == "answer done"
         assert "reasoning_content" not in event
+
+
+def test_reasoning_adapter_sends_top_p_in_native_params():
+    model = ReasoningChatOpenAI(model="test", openai_api_key="EMPTY", model_kwargs={"top_p": 0.95})
+    assert model._default_params["top_p"] == 0.95
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sampling", [{}, {"top_p": 0.95}])
+async def test_openai_kb_route_forwards_top_p(monkeypatch, kb_chat_module, sampling):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from chatchat.server.api_server import kb_routes
+
+    chat = AsyncMock(return_value={"result": "ok"})
+    monkeypatch.setattr(kb_routes, "kb_chat", chat)
+    app = FastAPI()
+    app.include_router(kb_routes.kb_router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/knowledge_base/local_kb/test/chat/completions",
+            json={"messages": [{"role": "user", "content": "资金"}], **sampling},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"result": "ok"}
+    chat.assert_awaited_once()
+    assert chat.call_args.kwargs["top_p"] == sampling.get("top_p")
+
+
+@pytest.mark.parametrize("top_p", [0, -0.1, 1.1])
+def test_kb_chat_rejects_out_of_range_top_p(kb_chat_module, top_p):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+    app.post("/chat/kb_chat")(kb_chat_module.kb_chat)
+    with TestClient(app) as client:
+        response = client.post("/chat/kb_chat", json={"query": "test", "kb_name": "test", "top_p": top_p})
+    assert response.status_code == 422
