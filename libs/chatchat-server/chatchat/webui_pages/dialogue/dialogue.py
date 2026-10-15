@@ -498,7 +498,7 @@ def dialogue_page(
                                     }
                                 )
                                 url = (
-                                    f"{api.base_url}/knowledge_base/download_doc?" + parameters
+                                    f"{str(api.base_url).rstrip('/')}/knowledge_base/download_doc?" + parameters
                                 )
                                 ref = f"""出处 [{inum + 1}] [{filename}]({url}) \n\n{doc.page_content}\n\n"""
                                 source_documents.append(ref)
