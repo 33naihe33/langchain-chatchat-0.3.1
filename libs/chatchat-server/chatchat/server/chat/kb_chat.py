@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio, json
 from urllib.parse import urlencode
 import uuid
-from typing import AsyncIterable, List, Optional, Literal
+from typing import Any, AsyncIterable, Dict, List, Optional, Literal
 
 from fastapi import Body, Request
 from fastapi.concurrency import run_in_threadpool
@@ -57,6 +57,10 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                 ),
                 return_direct: bool = Body(False, description="直接返回检索结果，不送入 LLM"),
                 request: Request = None,
+                chat_template_kwargs: Optional[Dict[str, Any]] = Body(
+                    None,
+                    description="模型聊天模板参数，例如 {\"enable_thinking\": false}；不提供时沿用模型服务默认值",
+                ),
                 ):
     if mode == "local_kb":
         kb = KBServiceFactory.get_service_by_name(kb_name)
@@ -126,12 +130,19 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
             langfuse_handler = CallbackHandler()
             callbacks.append(langfuse_handler)
 
+        model_kwargs = {}
+        if top_p is not None:
+            model_kwargs["top_p"] = top_p
+        if chat_template_kwargs is not None:
+            # The OpenAI SDK merges extra_body into the model service's JSON body.
+            model_kwargs["extra_body"] = {"chat_template_kwargs": chat_template_kwargs}
+
         llm = get_ChatOpenAI(
             model_name=model,
             temperature=temperature,
             max_tokens=max_tokens,
             callbacks=callbacks,
-            **({"model_kwargs": {"top_p": top_p}} if top_p is not None else {}),
+            **({"model_kwargs": model_kwargs} if model_kwargs else {}),
         )
         # TODO： 视情况使用 API
         # # 加入reranker

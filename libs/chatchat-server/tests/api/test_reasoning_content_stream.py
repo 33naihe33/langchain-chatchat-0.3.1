@@ -198,7 +198,8 @@ def kb_chat_module(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize("top_p", [None, 0.95])
-async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream, top_p, kb_chat_module):
+@pytest.mark.parametrize("chat_template_kwargs", [None, {}, {"enable_thinking": False}, {"enable_thinking": True}])
+async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream, top_p, chat_template_kwargs, kb_chat_module):
     pieces = [
         ("", "think"),
         ("answer", "more thought"),
@@ -238,10 +239,15 @@ async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream,
 
     def fake_model_factory(**kwargs):
         nonlocal callback
-        if top_p is None:
+        expected = {}
+        if top_p is not None:
+            expected["top_p"] = top_p
+        if chat_template_kwargs is not None:
+            expected["extra_body"] = {"chat_template_kwargs": chat_template_kwargs}
+        if not expected:
             assert "model_kwargs" not in kwargs
         else:
-            assert kwargs["model_kwargs"] == {"top_p": top_p}
+            assert kwargs["model_kwargs"] == expected
         callback = kwargs["callbacks"][0]
         return object()
 
@@ -258,6 +264,7 @@ async def test_kb_chat_keeps_reasoning_separate_from_answer(monkeypatch, stream,
         model="test",
         temperature=0,
         top_p=top_p,
+        chat_template_kwargs=chat_template_kwargs,
         max_tokens=32,
         prompt_name="default",
         return_direct=False,
@@ -287,7 +294,8 @@ def test_reasoning_adapter_sends_top_p_in_native_params():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sampling", [{}, {"top_p": 0.95}])
-async def test_openai_kb_route_forwards_top_p(monkeypatch, kb_chat_module, sampling):
+@pytest.mark.parametrize("template", [{}, {"chat_template_kwargs": {"enable_thinking": False}}])
+async def test_openai_kb_route_forwards_top_p(monkeypatch, kb_chat_module, sampling, template):
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
     from chatchat.server.api_server import kb_routes
@@ -299,12 +307,37 @@ async def test_openai_kb_route_forwards_top_p(monkeypatch, kb_chat_module, sampl
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/knowledge_base/local_kb/test/chat/completions",
-            json={"messages": [{"role": "user", "content": "资金"}], **sampling},
+            json={"messages": [{"role": "user", "content": "资金"}], **sampling, **template},
         )
     assert response.status_code == 200
     assert response.json() == {"result": "ok"}
     chat.assert_awaited_once()
     assert chat.call_args.kwargs["top_p"] == sampling.get("top_p")
+    assert chat.call_args.kwargs["chat_template_kwargs"] == template.get("chat_template_kwargs")
+
+
+@pytest.mark.asyncio
+async def test_reasoning_adapter_serializes_chat_template_kwargs_in_request_body():
+    from httpx import AsyncClient, MockTransport, Response
+    from openai import AsyncOpenAI
+
+    requests = []
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return Response(200, headers={"content-type": "text/event-stream"}, content='data: [DONE]\n\n')
+
+    async with AsyncClient(transport=MockTransport(handle)) as http_client:
+        client = AsyncOpenAI(api_key="EMPTY", base_url="http://model/v1", http_client=http_client)
+        model = ReasoningChatOpenAI(
+            model="MiniCPM5-2B", openai_api_key="EMPTY", async_client=client.chat.completions,
+            model_kwargs={"top_p": 0.95, "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+        )
+        chunks = [chunk async for chunk in model._astream([])]
+    assert chunks == []
+    assert requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert requests[0]["top_p"] == 0.95
+    assert "extra_body" not in requests[0]
 
 
 @pytest.mark.parametrize("top_p", [0, -0.1, 1.1])

@@ -56,6 +56,7 @@ async def kb_chat_endpoint(
         model=body.model,
         temperature=body.temperature,
         top_p=body.top_p,
+        chat_template_kwargs=extra.get("chat_template_kwargs"),
         max_tokens=body.max_tokens,
         prompt_name=extra.get("prompt_name", "default"),
         return_direct=extra.get("return_direct", False),
