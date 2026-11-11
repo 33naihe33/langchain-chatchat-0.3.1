@@ -128,6 +128,23 @@ class BasicSettings(BaseFileSettings):
         Path(self.KB_ROOT_PATH).mkdir(parents=True, exist_ok=True)
 
 
+class KBChatSettings(BaseFileSettings):
+    """/chat/kb_chat 的请求默认值；请求显式传参时优先使用请求值。"""
+
+    model_config = SettingsConfigDict(yaml_file=CHATCHAT_ROOT / "kb_chat_settings.yaml")
+
+    TOP_K: int = Field(5, gt=0, description="匹配文档数量")
+    SCORE_THRESHOLD: float = Field(0.5, ge=0, le=2, description="知识库匹配相关度阈值")
+    TEMPERATURE: float = Field(0, ge=0, le=2, description="LLM 采样温度")
+    TOP_P: float = Field(0.95, gt=0, le=1, description="核采样概率")
+    THINKING_MAX_TOKENS: int = Field(4096, gt=0, description="思考模式最大生成 Token 数")
+    NON_THINKING_MAX_TOKENS: int = Field(2048, gt=0, description="非思考模式最大生成 Token 数")
+    THINKING_REPETITION_PENALTY: t.Optional[float] = Field(
+        1.05, gt=0, description="思考模式重复惩罚；null 表示沿用模型服务默认值")
+    NON_THINKING_REPETITION_PENALTY: t.Optional[float] = Field(
+        None, gt=0, description="非思考模式重复惩罚；null 表示沿用模型服务默认值")
+
+
 class KBSettings(BaseFileSettings):
     """知识库相关配置"""
 
@@ -810,6 +827,7 @@ class SettingsContainer:
 
     basic_settings: BasicSettings = settings_property(BasicSettings())
     kb_settings: KBSettings = settings_property(KBSettings())
+    kb_chat_settings: KBChatSettings = settings_property(KBChatSettings())
     model_settings: ApiModelSettings = settings_property(ApiModelSettings())
     tool_settings: ToolSettings = settings_property(ToolSettings())
     prompt_settings: PromptSettings = settings_property(PromptSettings())
@@ -817,6 +835,7 @@ class SettingsContainer:
     def createl_all_templates(self):
         self.basic_settings.create_template_file(write_file=True)
         self.kb_settings.create_template_file(write_file=True)
+        self.kb_chat_settings.create_template_file(write_file=True)
         self.model_settings.create_template_file(sub_comments={
             "MODEL_PLATFORMS": {"model_obj": PlatformConfig(),
                                 "is_entire_comment": True}},
@@ -827,6 +846,7 @@ class SettingsContainer:
     def set_auto_reload(self, flag: bool=True):
         self.basic_settings.auto_reload = flag
         self.kb_settings.auto_reload = flag
+        self.kb_chat_settings.auto_reload = flag
         self.model_settings.auto_reload = flag
         self.tool_settings.auto_reload = flag
         self.prompt_settings.auto_reload = flag

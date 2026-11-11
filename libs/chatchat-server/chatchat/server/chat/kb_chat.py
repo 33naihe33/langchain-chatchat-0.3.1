@@ -63,10 +63,10 @@ async def _close_request_resources(iterator, callback_iterator, model_task):
 async def kb_chat(query: str = Body(..., description="用户输入", examples=["你好"]),
                 mode: Literal["local_kb", "temp_kb", "search_engine"] = Body("local_kb", description="知识来源"),
                 kb_name: str = Body("", description="mode=local_kb时为知识库名称；temp_kb时为临时知识库ID，search_engine时为搜索引擎名称", examples=["samples"]),
-                top_k: int = Body(Settings.kb_settings.VECTOR_SEARCH_TOP_K, description="匹配向量数"),
-                score_threshold: float = Body(
-                    Settings.kb_settings.SCORE_THRESHOLD,
-                    description="知识库匹配相关度阈值，取值范围在0-1之间，SCORE越小，相关度越高，取到1相当于不筛选，建议设置在0.5左右",
+                top_k: Optional[int] = Body(None, description="匹配向量数；未提供时读取 kb_chat_settings.yaml"),
+                score_threshold: Optional[float] = Body(
+                    None,
+                    description="知识库匹配相关度阈值；未提供时读取 kb_chat_settings.yaml。取值范围0-2，SCORE越小，相关度越高",
                     ge=0,
                     le=2,
                 ),
@@ -81,11 +81,11 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                 ),
                 stream: bool = Body(True, description="流式输出"),
                 model: str = Body(get_default_llm(), description="LLM 模型名称。"),
-                temperature: float = Body(Settings.model_settings.TEMPERATURE, description="LLM 采样温度", ge=0.0, le=2.0),
-                top_p: Optional[float] = Body(None, description="核采样概率；不提供时沿用模型服务默认值", gt=0.0, le=1.0),
+                temperature: Optional[float] = Body(None, description="LLM 采样温度；未提供时读取 kb_chat_settings.yaml", ge=0.0, le=2.0),
+                top_p: Optional[float] = Body(None, description="核采样概率；未提供时读取 kb_chat_settings.yaml", gt=0.0, le=1.0),
                 max_tokens: Optional[int] = Body(
-                    Settings.model_settings.MAX_TOKENS,
-                    description="限制LLM生成Token数量，默认None代表模型最大值"
+                    None,
+                    description="限制LLM生成Token数量；未提供或为null时，按思考模式读取 kb_chat_settings.yaml"
                 ),
                 prompt_name: str = Body(
                     "default",
@@ -97,7 +97,27 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                     None,
                     description="模型聊天模板参数，例如 {\"enable_thinking\": false}；不提供时沿用模型服务默认值",
                 ),
+                repetition_penalty: Optional[float] = Body(
+                    None, gt=0.0,
+                    description="重复惩罚；未提供或为null时，按思考模式读取 kb_chat_settings.yaml",
+                ),
                 ):
+    defaults = Settings.kb_chat_settings
+    if top_k is None:
+        top_k = defaults.TOP_K
+    if score_threshold is None:
+        score_threshold = defaults.SCORE_THRESHOLD
+    if temperature is None:
+        temperature = defaults.TEMPERATURE
+    if top_p is None:
+        top_p = defaults.TOP_P
+    thinking = not (isinstance(chat_template_kwargs, dict)
+                    and chat_template_kwargs.get("enable_thinking") is False)
+    if max_tokens is None:
+        max_tokens = defaults.THINKING_MAX_TOKENS if thinking else defaults.NON_THINKING_MAX_TOKENS
+    if repetition_penalty is None:
+        repetition_penalty = (defaults.THINKING_REPETITION_PENALTY if thinking
+                              else defaults.NON_THINKING_REPETITION_PENALTY)
     trace = new_trace(request)
     request_id = trace.request_id if trace else uuid.uuid4().hex
     log_payload('/chat/kb_chat', 'request', request_id, dict(
@@ -105,7 +125,7 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
         score_threshold=score_threshold,
         history=[History.from_data(h).model_dump() for h in history],
         stream=stream, model=model, temperature=temperature, top_p=top_p,
-        max_tokens=max_tokens, prompt_name=prompt_name,
+        max_tokens=max_tokens, repetition_penalty=repetition_penalty, prompt_name=prompt_name,
         return_direct=return_direct, chat_template_kwargs=chat_template_kwargs,
     ))
     if trace:
@@ -191,9 +211,14 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
             model_kwargs = {}
             if top_p is not None:
                 model_kwargs["top_p"] = top_p
+            # The OpenAI SDK merges extra_body into the model service's JSON body.
+            extra_body = {}
             if chat_template_kwargs is not None:
-                # The OpenAI SDK merges extra_body into the model service's JSON body.
-                model_kwargs["extra_body"] = {"chat_template_kwargs": chat_template_kwargs}
+                extra_body["chat_template_kwargs"] = chat_template_kwargs
+            if repetition_penalty is not None:
+                extra_body["repetition_penalty"] = repetition_penalty
+            if extra_body:
+                model_kwargs["extra_body"] = extra_body
 
             llm = get_ChatOpenAI(
                 model_name=model,
