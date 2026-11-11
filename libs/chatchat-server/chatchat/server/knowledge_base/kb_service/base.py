@@ -1,3 +1,5 @@
+from chatchat.server.rag_performance import stage
+
 import operator
 import os
 from abc import ABC, abstractmethod
@@ -81,7 +83,9 @@ class KBService(ABC):
         pass
 
     def check_embed_model(self, error_msg: str) -> bool:
-        if not _check_embed_model(self.embed_model):
+        with stage("embedding.check"):
+            available = _check_embed_model(self.embed_model)
+        if not available:
             logger.error(error_msg, exc_info=True)
             return False
         else:

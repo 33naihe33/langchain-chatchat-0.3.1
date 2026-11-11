@@ -7,6 +7,7 @@ from langchain.prompts.prompt import PromptTemplate
 from sse_starlette import EventSourceResponse
 
 from chatchat.server.api_server.api_schemas import OpenAIChatInput
+from chatchat.server.chat.treasury_parse import router as treasury_router
 from chatchat.server.chat.chat import chat
 from chatchat.server.chat.kb_chat import kb_chat
 from chatchat.server.chat.feedback import chat_feedback
@@ -26,6 +27,8 @@ from .openai_routes import openai_request, OpenAIChatOutput
 logger = build_logger()
 
 chat_router = APIRouter(prefix="/chat", tags=["ChatChat 对话"])
+
+chat_router.include_router(treasury_router)
 
 # chat_router.post(
 #     "/chat",

@@ -1,12 +1,18 @@
 from functools import partial
 import logging
 import os
+from pathlib import Path
+from threading import Lock
 import time
 import typing as t
 
 import loguru
 import loguru._logger
 from chatchat.settings import Settings
+
+
+_file_sinks = {}
+_file_sinks_lock = Lock()
 
 
 def build_logger(log_file: str = "chatchat"):
@@ -26,7 +32,11 @@ def build_logger(log_file: str = "chatchat"):
             log_file = f"{log_file}.log"
         if not os.path.isabs(log_file):
             log_file = str((Settings.basic_settings.LOG_PATH / log_file).resolve())
-        logger.add(log_file, colorize=False)
+        log_file = str(Path(log_file).resolve())
+        # Loguru wrappers share one core; repeated imports must reuse its sink.
+        with _file_sinks_lock:
+            if log_file not in _file_sinks:
+                _file_sinks[log_file] = logger.add(log_file, colorize=False)
 
     logger.error = logger.opt(exception=True).error
 

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import asyncio, json
+from contextlib import nullcontext
+
+from anyio import CancelScope
+from time import perf_counter
+
+from chatchat.server.chat.payload_logging import log_payload
+from chatchat.server.rag_performance import new_trace, stage, ModelTimingCallback
 from urllib.parse import urlencode
 import uuid
 from typing import Any, AsyncIterable, Dict, List, Optional, Literal
@@ -22,6 +29,35 @@ from chatchat.server.knowledge_base.utils import format_reference
 from chatchat.server.utils import (wrap_done, get_ChatOpenAI, get_default_llm,
                                    BaseResponse, get_prompt_template,
                                 )
+
+
+class KBEventSourceResponse(EventSourceResponse):
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # sse-starlette may be cancelled in send() while the generator is
+            # suspended at yield. Explicitly close it before returning so the
+            # model task and request trace do not outlive a disconnected client.
+            with CancelScope(shield=True):
+                await self.body_iterator.aclose()
+
+
+async def _close_request_resources(iterator, callback_iterator, model_task):
+    # Attempt every cleanup even if an earlier generator's finally raises.
+    # Shield against the AnyIO cancellation scope used for SSE disconnects.
+    with CancelScope(shield=True):
+        try:
+            await iterator.aclose()
+        finally:
+            try:
+                if callback_iterator is not None:
+                    await callback_iterator.aclose()
+            finally:
+                if model_task is not None:
+                    if not model_task.done():
+                        model_task.cancel()
+                    await asyncio.gather(model_task, return_exceptions=True)
 
 
 async def kb_chat(query: str = Body(..., description="用户输入", examples=["你好"]),
@@ -62,39 +98,58 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                     description="模型聊天模板参数，例如 {\"enable_thinking\": false}；不提供时沿用模型服务默认值",
                 ),
                 ):
+    trace = new_trace(request)
+    request_id = trace.request_id if trace else uuid.uuid4().hex
+    log_payload('/chat/kb_chat', 'request', request_id, dict(
+        query=query, mode=mode, kb_name=kb_name, top_k=top_k,
+        score_threshold=score_threshold,
+        history=[History.from_data(h).model_dump() for h in history],
+        stream=stream, model=model, temperature=temperature, top_p=top_p,
+        max_tokens=max_tokens, prompt_name=prompt_name,
+        return_direct=return_direct, chat_template_kwargs=chat_template_kwargs,
+    ))
+    if trace:
+        trace.event("request.start", mode=mode, model=model)
+    model_task = None
+    callback_iterator = None
     if mode == "local_kb":
         kb = KBServiceFactory.get_service_by_name(kb_name)
         if kb is None:
-            return BaseResponse(code=404, msg=f"未找到知识库 {kb_name}")
+            if trace:
+                trace.event("request.end", status="not_found", duration_ms=round((perf_counter() - trace.started) * 1000, 3))
+            response = BaseResponse(code=404, msg=f"未找到知识库 {kb_name}")
+            log_payload('/chat/kb_chat', 'response', request_id, response.model_dump())
+            return response
     
     async def knowledge_base_chat_iterator() -> AsyncIterable[str]:
-        nonlocal history, prompt_name
+        nonlocal history, prompt_name, model_task, callback_iterator
 
         history = [History.from_data(h) for h in history]
 
-        if mode == "local_kb":
-            docs = await run_in_threadpool(search_docs,
-                                            query=query,
-                                            knowledge_base_name=kb_name,
-                                            top_k=top_k,
-                                            score_threshold=score_threshold,
-                                            file_name="",
-                                            metadata={})
-            source_documents = format_reference(kb_name, docs, request.base_url)
-        elif mode == "temp_kb":
-            docs = await run_in_threadpool(search_temp_docs,
-                                            kb_name,
-                                            query=query,
-                                            top_k=top_k,
-                                            score_threshold=score_threshold)
-            source_documents = format_reference(kb_name, docs, request.base_url)
-        elif mode == "search_engine":
-            result = await run_in_threadpool(search_engine, query, top_k, kb_name)
-            docs = [x.dict() for x in result.get("docs", [])]
-            source_documents = [f"""出处 [{i + 1}] [{d['metadata']['filename']}]({d['metadata']['source']}) \n\n{d['page_content']}\n\n""" for i,d in enumerate(docs)]
-        else:
-            docs = []
-            source_documents = []
+        with stage("retrieval"):
+            if mode == "local_kb":
+                docs = await run_in_threadpool(search_docs,
+                                                query=query,
+                                                knowledge_base_name=kb_name,
+                                                top_k=top_k,
+                                                score_threshold=score_threshold,
+                                                file_name="",
+                                                metadata={})
+                source_documents = format_reference(kb_name, docs, request.base_url)
+            elif mode == "temp_kb":
+                docs = await run_in_threadpool(search_temp_docs,
+                                                kb_name,
+                                                query=query,
+                                                top_k=top_k,
+                                                score_threshold=score_threshold)
+                source_documents = format_reference(kb_name, docs, request.base_url)
+            elif mode == "search_engine":
+                result = await run_in_threadpool(search_engine, query, top_k, kb_name)
+                docs = [x.dict() for x in result.get("docs", [])]
+                source_documents = [f"""出处 [{i + 1}] [{d['metadata']['filename']}]({d['metadata']['source']}) \n\n{d['page_content']}\n\n""" for i,d in enumerate(docs)]
+            else:
+                docs = []
+                source_documents = []
         # import rich
         # rich.print(dict(
         #     mode=mode,
@@ -116,69 +171,74 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
             ) .model_dump_json()
             return
 
-        callback = KBReasoningCallbackHandler()
-        callbacks = [callback]
+        with stage("generation.prepare"):
+            callback = KBReasoningCallbackHandler()
+            callbacks = [callback]
+            if trace:
+                callbacks.append(ModelTimingCallback(trace))
 
-        # Enable langchain-chatchat to support langfuse
-        import os
-        langfuse_secret_key = os.environ.get('LANGFUSE_SECRET_KEY')
-        langfuse_public_key = os.environ.get('LANGFUSE_PUBLIC_KEY')
-        langfuse_host = os.environ.get('LANGFUSE_HOST')
-        if langfuse_secret_key and langfuse_public_key and langfuse_host :
-            from langfuse import Langfuse
-            from langfuse.callback import CallbackHandler
-            langfuse_handler = CallbackHandler()
-            callbacks.append(langfuse_handler)
+            # Enable langchain-chatchat to support langfuse
+            import os
+            langfuse_secret_key = os.environ.get('LANGFUSE_SECRET_KEY')
+            langfuse_public_key = os.environ.get('LANGFUSE_PUBLIC_KEY')
+            langfuse_host = os.environ.get('LANGFUSE_HOST')
+            if langfuse_secret_key and langfuse_public_key and langfuse_host :
+                from langfuse import Langfuse
+                from langfuse.callback import CallbackHandler
+                langfuse_handler = CallbackHandler()
+                callbacks.append(langfuse_handler)
 
-        model_kwargs = {}
-        if top_p is not None:
-            model_kwargs["top_p"] = top_p
-        if chat_template_kwargs is not None:
-            # The OpenAI SDK merges extra_body into the model service's JSON body.
-            model_kwargs["extra_body"] = {"chat_template_kwargs": chat_template_kwargs}
+            model_kwargs = {}
+            if top_p is not None:
+                model_kwargs["top_p"] = top_p
+            if chat_template_kwargs is not None:
+                # The OpenAI SDK merges extra_body into the model service's JSON body.
+                model_kwargs["extra_body"] = {"chat_template_kwargs": chat_template_kwargs}
 
-        llm = get_ChatOpenAI(
-            model_name=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            callbacks=callbacks,
-            **({"model_kwargs": model_kwargs} if model_kwargs else {}),
-        )
-        # TODO： 视情况使用 API
-        # # 加入reranker
-        # if Settings.kb_settings.USE_RERANKER:
-        #     reranker_model_path = get_model_path(Settings.kb_settings.RERANKER_MODEL)
-        #     reranker_model = LangchainReranker(top_n=top_k,
-        #                                     device=embedding_device(),
-        #                                     max_length=Settings.kb_settings.RERANKER_MAX_LENGTH,
-        #                                     model_name_or_path=reranker_model_path
-        #                                     )
-        #     print("-------------before rerank-----------------")
-        #     print(docs)
-        #     docs = reranker_model.compress_documents(documents=docs,
-        #                                              query=query)
-        #     print("------------after rerank------------------")
-        #     print(docs)
-        context = "\n\n".join([doc["page_content"] for doc in docs])
+            llm = get_ChatOpenAI(
+                model_name=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                callbacks=callbacks,
+                **({"model_kwargs": model_kwargs} if model_kwargs else {}),
+            )
+            # TODO： 视情况使用 API
+            # # 加入reranker
+            # if Settings.kb_settings.USE_RERANKER:
+            #     reranker_model_path = get_model_path(Settings.kb_settings.RERANKER_MODEL)
+            #     reranker_model = LangchainReranker(top_n=top_k,
+            #                                     device=embedding_device(),
+            #                                     max_length=Settings.kb_settings.RERANKER_MAX_LENGTH,
+            #                                     model_name_or_path=reranker_model_path
+            #                                     )
+            #     print("-------------before rerank-----------------")
+            #     print(docs)
+            #     docs = reranker_model.compress_documents(documents=docs,
+            #                                              query=query)
+            #     print("------------after rerank------------------")
+            #     print(docs)
+            context = "\n\n".join([doc["page_content"] for doc in docs])
 
-        if len(docs) == 0:  # 如果没有找到相关文档，使用empty模板
-            prompt_name = "empty"
-        prompt_template = get_prompt_template("rag", prompt_name)
-        input_msg = History(role="user", content=prompt_template).to_msg_template(False)
-        chat_prompt = ChatPromptTemplate.from_messages(
-            [i.to_msg_template() for i in history] + [input_msg])
+            if len(docs) == 0:  # 如果没有找到相关文档，使用empty模板
+                prompt_name = "empty"
+            prompt_template = get_prompt_template("rag", prompt_name)
+            input_msg = History(role="user", content=prompt_template).to_msg_template(False)
+            chat_prompt = ChatPromptTemplate.from_messages(
+                [i.to_msg_template() for i in history] + [input_msg])
 
-        chain = chat_prompt | llm
+            chain = chat_prompt | llm
 
         # Begin a task that runs in the background.
-        task = asyncio.create_task(wrap_done(
-            chain.ainvoke({"context": context, "question": query}),
-            callback.done),
-        )
+        async def invoke_model():
+            with stage("model.invoke"):
+                await chain.ainvoke({"context": context, "question": query})
+
+        model_task = asyncio.create_task(wrap_done(invoke_model(), callback.done))
 
         if len(source_documents) == 0:  # 没有找到相关文档
             source_documents.append(f"<span style='color:red'>未找到相关文档,该回答为大模型自身能力解答！</span>")
 
+        callback_iterator = callback.aiter()
         if stream:
             # yield documents first
             ret = OpenAIChatOutput(
@@ -191,7 +251,12 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
             )
             yield ret.model_dump_json()
 
-            async for piece in callback.aiter():
+            first_content = True
+            async for piece in callback_iterator:
+                if piece["content"] and first_content:
+                    if trace:
+                        trace.event("api.first_content")
+                    first_content = False
                 ret = OpenAIChatOutput(
                     id=f"chat{uuid.uuid4()}",
                     object="chat.completion.chunk",
@@ -203,7 +268,12 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                 yield ret.model_dump_json()
         else:
             answer = ""
-            async for piece in callback.aiter():
+            first_content = True
+            async for piece in callback_iterator:
+                if piece["content"] and first_content:
+                    if trace:
+                        trace.event("api.first_content")
+                    first_content = False
                 answer += piece["content"]
             ret = OpenAIChatOutput(
                 id=f"chat{uuid.uuid4()}",
@@ -213,9 +283,64 @@ async def kb_chat(query: str = Body(..., description="用户输入", examples=["
                 model=model,
             )
             yield ret.model_dump_json()
-        await task
+        await model_task
+
+    async def timed_iterator():
+        completed = False
+        iterator = knowledge_base_chat_iterator()
+        response_payload = {}
+        contents, reasoning = [], []
+        try:
+            while True:
+                # Do not retain a ContextVar token across a yield to the SSE
+                # consumer: closing/disconnect may happen in another context.
+                with trace.activate() if trace else nullcontext():
+                    try:
+                        item = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        completed = True
+                        break
+                chunk = json.loads(item)
+                response_payload.update({key: value for key, value in chunk.items()
+                                         if key != 'docs'})
+                if 'docs' in chunk:
+                    response_payload['docs'] = chunk['docs']
+                choice = chunk['choices'][0]
+                message = choice.get('delta', choice.get('message', {}))
+                contents.append(message.get('content') or '')
+                reasoning.append(message.get('reasoning_content') or '')
+                yield item
+            choice = response_payload['choices'][0]
+            message = choice.get('delta', choice.get('message', {}))
+            message['content'] = ''.join(contents)
+            if any(reasoning):
+                message['reasoning_content'] = ''.join(reasoning)
+            log_payload('/chat/kb_chat', 'response', request_id, response_payload)
+        except BaseException as exc:
+            if trace:
+                trace.status = "cancelled" if isinstance(exc, (asyncio.CancelledError, GeneratorExit)) else "error"
+                trace.event("request.error", error_type=type(exc).__name__)
+            raise
+        finally:
+            with trace.activate() if trace else nullcontext():
+                try:
+                    await _close_request_resources(iterator, callback_iterator, model_task)
+                except BaseException as exc:
+                    if trace:
+                        trace.status = "cancelled" if isinstance(exc, (asyncio.CancelledError, GeneratorExit)) else "error"
+                        trace.event("request.error", phase="cleanup", error_type=type(exc).__name__)
+                    raise
+                finally:
+                    if trace:
+                        status = trace.status if completed or trace.status != "ok" else "cancelled"
+                        trace.event("request.end", status=status,
+                                    duration_ms=round((perf_counter() - trace.started) * 1000, 3))
 
     if stream:
-        return EventSourceResponse(knowledge_base_chat_iterator())
+        headers = {"X-Request-ID": trace.request_id} if trace else None
+        return KBEventSourceResponse(timed_iterator(), headers=headers)
     else:
-        return await knowledge_base_chat_iterator().__anext__()
+        # Exhaust the iterator so completion and context cleanup precede return.
+        async for item in timed_iterator():
+            result = item
+        return result

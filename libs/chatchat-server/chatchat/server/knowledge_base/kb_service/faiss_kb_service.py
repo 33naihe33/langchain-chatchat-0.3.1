@@ -1,11 +1,15 @@
 import os
 import shutil
+from contextlib import ExitStack
+
+from chatchat.server.rag_performance import stage
 from typing import Dict, List, Tuple
 
 from langchain.docstore.document import Document
 
 from chatchat.settings import Settings
 from chatchat.server.file_rag.utils import get_Retriever
+from chatchat.server.file_rag.retrievers.bm25_cache import invalidate_bm25_cache
 from chatchat.server.knowledge_base.kb_cache.faiss_cache import (
     ThreadSafeFaiss,
     kb_faiss_pool,
@@ -44,6 +48,7 @@ class FaissKBService(KBService):
 
     def del_doc_by_ids(self, ids: List[str]) -> bool:
         with self.load_vector_store().acquire() as vs:
+            invalidate_bm25_cache(vs)
             vs.delete(ids)
 
     def do_init(self):
@@ -69,13 +74,20 @@ class FaissKBService(KBService):
         top_k: int,
         score_threshold: float = Settings.kb_settings.SCORE_THRESHOLD,
     ) -> List[Tuple[Document, float]]:
-        with self.load_vector_store().acquire() as vs:
-            retriever = get_Retriever("ensemble").from_vectorstore(
-                vs,
-                top_k=top_k,
-                score_threshold=score_threshold,
-            )
-            docs = retriever.get_relevant_documents(query)
+        with stage("vector.load"):
+            vectorstore = self.load_vector_store()
+        with ExitStack() as stack:
+            with stage("vector.lock_wait"):
+                vs = stack.enter_context(vectorstore.acquire())
+            with stage("vector.lock_hold"):
+                with stage("retriever.build"):
+                    retriever = get_Retriever("ensemble").from_vectorstore(
+                        vs,
+                        top_k=top_k,
+                        score_threshold=score_threshold,
+                    )
+                with stage("retriever.search"):
+                    docs = retriever.get_relevant_documents(query)
         return docs
 
     def do_add_doc(
@@ -87,6 +99,7 @@ class FaissKBService(KBService):
         metadatas = [x.metadata for x in docs]
         with self.load_vector_store().acquire() as vs:
             embeddings = vs.embeddings.embed_documents(texts)
+            invalidate_bm25_cache(vs)
             ids = vs.add_embeddings(
                 text_embeddings=zip(texts, embeddings), metadatas=metadatas
             )
@@ -103,6 +116,7 @@ class FaissKBService(KBService):
                 if v.metadata.get("source").lower() == kb_file.filename.lower()
             ]
             if len(ids) > 0:
+                invalidate_bm25_cache(vs)
                 vs.delete(ids)
             if not kwargs.get("not_refresh_vs_cache"):
                 vs.save_local(self.vs_path)

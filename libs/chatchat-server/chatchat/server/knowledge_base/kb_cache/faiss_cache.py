@@ -8,6 +8,7 @@ from chatchat.settings import Settings
 from chatchat.server.knowledge_base.kb_cache.base import *
 from chatchat.server.knowledge_base.utils import get_vs_path
 from chatchat.server.utils import get_Embeddings, get_default_embedding
+from chatchat.server.file_rag.retrievers.bm25_cache import invalidate_bm25_cache
 
 
 # patch FAISS to include doc id in Document.metadata
@@ -45,6 +46,7 @@ class ThreadSafeFaiss(ThreadSafeObject):
         with self.acquire():
             ids = list(self._obj.docstore._dict.keys())
             if ids:
+                invalidate_bm25_cache(self._obj)
                 ret = self._obj.delete(ids)
                 assert len(self._obj.docstore._dict) == 0
             logger.info(f"已将向量库 {self.key} 清空")

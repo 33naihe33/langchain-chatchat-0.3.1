@@ -11,6 +11,7 @@ import shlex
 import statistics
 import sys
 import time
+import uuid
 from typing import Iterable, Iterator, Optional, Sequence, Tuple
 
 import requests
@@ -96,6 +97,8 @@ def run_once(args: argparse.Namespace, is_warmup: bool, run_number: int) -> dict
     params = {"stream": True, "model": args.model, "max_tokens": args.max_tokens,
               "temperature": args.temperature if args.temperature is not None else (0 if mode == "model" else 0.7),
               "top_p": args.top_p if args.top_p is not None else (1 if mode == "model" else 0.95)}
+    if getattr(args, "chat_template_kwargs", None) is not None:
+        params["chat_template_kwargs"] = args.chat_template_kwargs
     if mode == "model":
         params["messages"] = getattr(args, "history", []) + [{"role": "user", "content": args.query}]
         params["stream_options"] = {"include_usage": True}
@@ -106,6 +109,7 @@ def run_once(args: argparse.Namespace, is_warmup: bool, run_number: int) -> dict
                       top_k=args.top_k, score_threshold=args.score_threshold,
                       history=getattr(args, "history", []), prompt_name=args.prompt_name)
     row = {"record_type": "run", "run_number": run_number, "is_warmup": is_warmup,
+           "request_id": uuid.uuid4().hex, "response_request_id": None,
            "concurrency": args.concurrency,
            "started_at": dt.datetime.now(dt.timezone.utc).isoformat(), "request_params": params,
            "chat_success": False, "chat_error": None, "tpot_success": False, "tpot_error": None,
@@ -127,7 +131,9 @@ def run_once(args: argparse.Namespace, is_warmup: bool, run_number: int) -> dict
     try:
         started = time.perf_counter()
         response = requests.post(args.url, json=params, stream=True,
+                                 headers={"X-Request-ID": row["request_id"]},
                                  timeout=(args.connect_timeout, args.read_timeout))
+        row["response_request_id"] = getattr(response, "headers", {}).get("X-Request-ID")
         response.raise_for_status()
         for data in iter_sse_data(response.iter_content(chunk_size=None)):
             if mode == "model" and data.strip() == "[DONE]":
@@ -234,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--query")
     inputs.add_argument("--queries-file", help="UTF-8 JSON 数组：id、query、可选 group")
+    inputs.add_argument("--prompts-dir", help="model 重放 RAG 保存的单条 user 消息 TXT；每配置轮换整个目录")
     parser.add_argument("--kb-name")
     parser.add_argument("--prompt-name", default="default", help="RAG 业务提示词模板名")
     parser.add_argument("--model", default="MiniCPM5-2B")
@@ -243,7 +250,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--score-threshold", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top-p", type=float, default=None)
-    parser.add_argument("--runs", type=int, default=None, help="model 每题/预算默认 30；rag 每预算/并发默认 30")
+    parser.add_argument("--chat-template-kwargs", default=None,
+                        help='模型聊天模板参数 JSON 对象，例如 \'{"enable_thinking": false}\'；不传则沿用服务默认值')
+    parser.add_argument("--runs", type=int, default=None, help="model 每题/预算/并发默认 30；rag 每预算/并发默认 30")
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--concurrency", type=int, default=1, help="最多同时执行的轮次，默认 1（串行）")
     parser.add_argument("--concurrency-list", nargs="+", type=int)
@@ -261,10 +270,19 @@ def build_parser() -> argparse.ArgumentParser:
 def prepare_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.chat_template_kwargs is not None:
+        try:
+            args.chat_template_kwargs = json.loads(args.chat_template_kwargs)
+        except json.JSONDecodeError:
+            parser.error("--chat-template-kwargs 必须是 JSON 对象，例如 '{\"enable_thinking\": false}'")
+        if not isinstance(args.chat_template_kwargs, dict):
+            parser.error("--chat-template-kwargs 必须是 JSON 对象，例如 '{\"enable_thinking\": false}'")
     args.invocation = list(argv) if argv is not None else sys.argv[1:]
     if args.output and Path(args.output).suffix.lower() == ".md":
         parser.error("--output 不可使用 .md 后缀，避免与自动报告覆盖；建议使用 .jsonl")
     model_mode = args.benchmark_mode == "model"
+    if args.prompts_dir and not model_mode:
+        parser.error("--prompts-dir 仅支持 model 模式，直接重放已拼接的 prompt")
     args.runs = args.runs if args.runs is not None else 30
     args.temperature = args.temperature if args.temperature is not None else (0 if model_mode else 0.7)
     args.top_p = args.top_p if args.top_p is not None else (1 if model_mode else 0.95)
@@ -278,8 +296,6 @@ def prepare_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         parser.error("--concurrency 必须大于 0")
     if any(value < 1 for value in args.budgets):
         parser.error("所有输出预算必须大于 0")
-    if model_mode and any(value != 1 for value in args.concurrencies):
-        parser.error("model 基线模式并发固定为 1；业务并发请使用 rag 模式")
     if not model_mode and not args.kb_name:
         parser.error("rag 模式需要 --kb-name")
     if not model_mode and args.prompt_cache != "service-default":
@@ -296,7 +312,10 @@ def prepare_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
            for value in (args.connect_timeout, args.read_timeout)):
         parser.error("--connect-timeout 和 --read-timeout 必须是有限正数")
     try:
-        queries = json.loads(Path(args.queries_file).read_text(encoding="utf-8-sig")) if args.queries_file else [{"id": "single", "query": args.query}]
+        if args.prompts_dir:
+            queries = load_saved_prompts(Path(args.prompts_dir))
+        else:
+            queries = json.loads(Path(args.queries_file).read_text(encoding="utf-8-sig")) if args.queries_file else [{"id": "single", "query": args.query}]
         if not isinstance(queries, list) or not queries:
             raise ValueError("题集必须是非空 JSON 数组")
         ids = set()
@@ -316,8 +335,27 @@ def prepare_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return args
 
 
+def load_saved_prompts(directory: Path) -> list:
+    if not directory.is_dir():
+        raise ValueError(f"prompt 目录不存在：{directory}")
+    queries = []
+    for path in sorted(directory.glob("*.txt")):
+        text = path.read_text(encoding="utf-8-sig")
+        if not text.startswith("user: "):
+            raise ValueError(f"{path.name} 必须是以 'user: ' 开头的单条消息")
+        content = text[len("user: "):]
+        # to_string() 不是无损的多轮消息格式；遇到角色分隔符时拒绝猜测拆分。
+        if any(line.startswith(("user: ", "assistant: ", "system: ", "Human: ", "AI: ", "System: "))
+               for line in content.splitlines()):
+            raise ValueError(f"{path.name} 包含多条消息或歧义角色标签，请改用结构化题集 history")
+        queries.append({"id": path.stem, "query": content})
+    if not queries:
+        raise ValueError(f"prompt 目录中没有 TXT 文件：{directory}")
+    return queries
+
+
 def configurations(args):
-    groups = [[query] for query in args.queries] if args.benchmark_mode == "model" else [args.queries]
+    groups = [[query] for query in args.queries] if args.benchmark_mode == "model" and not getattr(args, "prompts_dir", None) else [args.queries]
     for index, queries in enumerate(groups, 1):
         for budget in dict.fromkeys(args.budgets):
             for concurrency in dict.fromkeys(args.concurrencies):
@@ -370,6 +408,7 @@ def write_report(path, args, summaries):
     lines = ["# 模型基线与 RAG 性能摸底测试说明", "", f"- 模式：`{args.benchmark_mode}`；接口：`{args.url}`。",
              f"- 客户端：{platform.platform()}；Python {platform.python_version()}；requests {requests.__version__}。",
              f"- 环境备注：{args.environment_label}。", f"- 采样参数：temperature={args.temperature}，top_p={args.top_p}。",
+             f"- 聊天模板参数：{json.dumps(args.chat_template_kwargs, ensure_ascii=False) if args.chat_template_kwargs is not None else '未指定（沿用模型服务默认值）'}。",
              f"- prompt 缓存：{args.prompt_cache}（off/on 为 llama.cpp 扩展，仅 model 模式发送）。",
              "- 暂无验收标准，仅描述本批实测表现。成功不代表答案正确或具备生产容量。",
              "- 模型服务槽位、量化、思考开关与线程数未自动探测，需由环境备注补充。", "",
@@ -449,7 +488,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 handle.write(line + "\n")
                 handle.flush()
             summary = summarize(records)
-            config_keys = ["model", "url", "tokenize_url", "max_tokens", "temperature", "top_p", "prompt_cache", "min_duration"]
+            config_keys = ["model", "url", "tokenize_url", "max_tokens", "temperature", "top_p", "chat_template_kwargs", "prompt_cache", "min_duration"]
             if config.benchmark_mode == "rag":
                 config_keys += ["top_k", "score_threshold", "kb_name", "prompt_name"]
             summary.update(configuration_id=config.configuration_id, benchmark_mode=config.benchmark_mode,

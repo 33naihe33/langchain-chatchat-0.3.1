@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import warnings
+
+from chatchat.server.rag_performance import stage
 from typing import (
     Any,
     Callable,
@@ -364,7 +366,8 @@ class LocalAIEmbeddings(BaseModel, Embeddings):
         Returns:
             Embedding for the text.
         """
-        embedding = self._embedding_func(text, engine=self.deployment)
+        with stage("embedding.query"):
+            embedding = self._embedding_func(text, engine=self.deployment)
         return embedding
 
     async def aembed_query(self, text: str) -> List[float]:
@@ -376,5 +379,6 @@ class LocalAIEmbeddings(BaseModel, Embeddings):
         Returns:
             Embedding for the text.
         """
-        embedding = await self._aembedding_func(text, engine=self.deployment)
+        with stage("embedding.query"):
+            embedding = await self._aembedding_func(text, engine=self.deployment)
         return embedding

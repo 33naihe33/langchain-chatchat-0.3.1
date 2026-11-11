@@ -311,6 +311,9 @@ class ApiModelSettings(BaseFileSettings):
 
     model_config = SettingsConfigDict(yaml_file=CHATCHAT_ROOT / "model_settings.yaml")
 
+    TREASURY_MODEL_OPTIONS: t.Dict[str, t.Dict[str, t.Any]] = Field(default_factory=dict)
+    """司库解析模型选项，按模型名称配置 mode、disable_thinking、context_check；环境变量优先，修改后重启 API。"""
+
     DEFAULT_LLM_MODEL: str = "glm4-chat"
     """默认选用的 LLM 名称"""
 

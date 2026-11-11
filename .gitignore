@@ -1,6 +1,10 @@
+tests/
+docs/examples/
+outputs/
 *.yaml
 *.json
 *.log
+*.md
 *.log.*
 *.bak
 /libs/chatchat-server/chatchat/data/*
